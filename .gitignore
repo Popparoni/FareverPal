@@ -1,0 +1,40 @@
+# --- Virtualenv (huge; recreate from requirements.txt) ---
+.venv/
+venv/
+env/
+
+# --- PyInstaller output ---
+# The one-file exe is ~305 MB and ships as a GitHub RELEASE ASSET, never in git
+# (GitHub rejects files >100 MB).
+dist/
+build/
+*.spec
+
+# --- Rust build output (farever_native) ---
+native/target/
+
+# --- Python caches / bytecode ---
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# --- Logs ---
+*.log
+
+# --- Secrets / credentials (none expected, but never commit these) ---
+.env
+.env.*
+*.pem
+*.key
+*.token
+credentials*
+secret*
+id_rsa*
+
+# --- Editor / OS cruft ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

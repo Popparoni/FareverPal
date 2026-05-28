@@ -1,0 +1,185 @@
+"""DPS engine — pure logic, headless-testable (no process reads here).
+
+Two damage sources feed the same aggregator:
+
+1. HP-DIFF (fallback): fed a per-tick snapshot of (addr, unit_id, hp), it diffs
+   each enemy's Health over time to derive outgoing damage. Team/area total
+   (can't attribute a hit to a player without a damage source). Bosses are
+   tracked the same as any enemy — the caller must NOT drop them by radius
+   (that was the old "boss HP missing" bug). Address reuse is guarded by a
+   unit-id change / implausible HP jump (rebaseline, not huge damage). An enemy
+   that vanishes while nearly dead and recently damaged is credited a kill.
+
+2. EVENTS (preferred, per-skill): `add_event(DamageEvent)` from the
+   `ui.comp.DamageDisplay` reader (see core/damage.py). Gives per-skill totals,
+   crit%, max hit, kills — the game pre-filters to your own outgoing damage.
+
+Both maintain a rolling-window DPS, encounter totals, and per-target / per-skill
+breakdowns. The UI shows per-skill when events are present, else per-target.
+"""
+from __future__ import annotations
+
+import time
+from collections import deque
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Track:
+    unit_id: str
+    last_hp: float
+    last_seen: float
+    max_hp: float
+    damaged_at: float = 0.0
+
+
+@dataclass
+class DamageEvent:
+    amount: float
+    skill: str = "?"
+    crit: bool = False
+    kill: bool = False
+    target: str = "?"
+    t: float = 0.0
+
+
+@dataclass
+class SkillStat:
+    total: float = 0.0
+    hits: int = 0
+    crits: int = 0
+    kills: int = 0
+    max_hit: float = 0.0
+
+
+class DpsMeter:
+    WINDOW = 5.0          # rolling DPS window (s)
+    IDLE_END = 7.0        # encounter ends after this long with no damage
+    KILL_GRACE = 2.0      # despawn within this of last damage = killing blow
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.tracks: dict[int, Track] = {}
+        self.events: deque[tuple[float, float]] = deque()   # (t, damage)
+        self.per_target: dict[str, float] = {}
+        self.per_skill: dict[str, SkillStat] = {}
+        self.encounter_start: float | None = None
+        self.encounter_end: float | None = None
+        self.total: float = 0.0
+        self.peak: float = 0.0
+        self.kills: int = 0
+        self.has_events: bool = False    # True once a real DamageEvent arrives
+
+    # --- HP-diff source --------------------------------------------------
+    def update(self, snapshot, now: float | None = None) -> None:
+        """snapshot: iterable of (addr:int, unit_id:str, hp:float|None)."""
+        now = time.monotonic() if now is None else now
+        self._maybe_roll_encounter(now)
+
+        seen = set()
+        for addr, uid, hp in snapshot:
+            if hp is None:
+                continue
+            seen.add(addr)
+            tr = self.tracks.get(addr)
+            reuse = tr is not None and (tr.unit_id != uid
+                                        or (tr.max_hp and hp > tr.max_hp * 1.5))
+            if tr is None or reuse:
+                self.tracks[addr] = Track(uid, hp, now, max_hp=hp)
+                continue
+            tr.max_hp = max(tr.max_hp, hp)
+            if hp < tr.last_hp:
+                self._add_damage(now, tr.last_hp - hp, uid)
+                tr.damaged_at = now
+            tr.last_hp = hp
+            tr.last_seen = now
+
+        for addr in list(self.tracks):
+            if addr in seen:
+                continue
+            tr = self.tracks[addr]
+            near_dead = bool(tr.max_hp) and tr.last_hp <= 0.15 * tr.max_hp
+            if tr.last_hp > 0 and near_dead and now - tr.damaged_at <= self.KILL_GRACE:
+                self._add_damage(now, tr.last_hp, tr.unit_id)
+                self.kills += 1
+            del self.tracks[addr]
+
+        self._prune(now)
+        self.peak = max(self.peak, self.current_dps(now))
+
+    # --- event source ----------------------------------------------------
+    def add_event(self, ev: DamageEvent, now: float | None = None) -> None:
+        now = ev.t or (time.monotonic() if now is None else now)
+        self.has_events = True
+        self._maybe_roll_encounter(now)
+        if ev.amount <= 0:
+            return
+        self._add_damage(now, ev.amount, ev.target)
+        st = self.per_skill.setdefault(ev.skill, SkillStat())
+        st.total += ev.amount
+        st.hits += 1
+        st.crits += 1 if ev.crit else 0
+        st.kills += 1 if ev.kill else 0
+        st.max_hit = max(st.max_hit, ev.amount)
+        if ev.kill:
+            self.kills += 1
+        self.peak = max(self.peak, self.current_dps(now))
+
+    # --- shared ----------------------------------------------------------
+    def _maybe_roll_encounter(self, now: float) -> None:
+        if (self.events and self.encounter_end is not None
+                and now - self.encounter_end > self.IDLE_END):
+            self._reset_encounter()
+
+    def _add_damage(self, now: float, dmg: float, key: str) -> None:
+        if dmg <= 0:
+            return
+        self.events.append((now, dmg))
+        self.total += dmg
+        self.per_target[key] = self.per_target.get(key, 0.0) + dmg
+        if self.encounter_start is None:
+            self.encounter_start = now
+        self.encounter_end = now
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.WINDOW
+        while self.events and self.events[0][0] < cutoff:
+            self.events.popleft()
+
+    def _reset_encounter(self) -> None:
+        self.events.clear()
+        self.per_target.clear()
+        self.per_skill.clear()
+        self.encounter_start = self.encounter_end = None
+        self.total = 0.0
+        self.peak = 0.0
+        self.kills = 0
+
+    # --- read ------------------------------------------------------------
+    def current_dps(self, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.WINDOW
+        return sum(d for t, d in self.events if t >= cutoff) / self.WINDOW
+
+    @property
+    def duration(self) -> float:
+        if self.encounter_start is None:
+            return 0.0
+        return (self.encounter_end or self.encounter_start) - self.encounter_start
+
+    @property
+    def encounter_dps(self) -> float:
+        d = self.duration
+        return self.total / d if d > 0 else 0.0
+
+    @property
+    def in_combat(self) -> bool:
+        return bool(self.events)
+
+    def top_targets(self, n: int = 6):
+        return sorted(self.per_target.items(), key=lambda kv: kv[1], reverse=True)[:n]
+
+    def top_skills(self, n: int = 8):
+        return sorted(self.per_skill.items(), key=lambda kv: kv[1].total, reverse=True)[:n]

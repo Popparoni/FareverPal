@@ -1,0 +1,9 @@
+# Runtime
+PySide6>=6.10
+pymem>=1.14          # fallback memory backend if farever_native isn't built
+pillow>=10
+
+# Build / dev (not needed at runtime)
+maturin>=1.5        # builds the Rust extension (farever_native)
+pyinstaller>=6      # one-file packaging
+pytest>=8           # headless tests
