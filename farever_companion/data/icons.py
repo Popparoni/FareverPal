@@ -205,3 +205,31 @@ def ui_qicon(name: str, color: str, size: int = 18):
     """`ui_icon` wrapped as a QIcon (for QPushButton.setIcon)."""
     QtGui, _ = _qt()
     return QtGui.QIcon(ui_icon(name, color, size))
+
+
+@lru_cache(maxsize=64)
+def brand_icon(name: str, size: int):
+    """A multi-color brand glyph from assets/icons_ui/<name>.svg rendered AS-IS
+    (no tinting) — for logos like the Google "G" that aren't single-color.
+    Missing/invalid -> transparent pixmap. Cached by (name, size)."""
+    QtGui, QtCore = _qt()
+    from PySide6.QtSvg import QSvgRenderer
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtGui.QColor(0, 0, 0, 0))
+    path = paths.assets_dir() / "icons_ui" / f"{name}.svg"
+    if path.exists():
+        try:
+            r = QSvgRenderer(str(path))
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            r.render(p, QtCore.QRectF(0, 0, size, size))
+            p.end()
+        except Exception:
+            pass
+    return pm
+
+
+def brand_qicon(name: str, size: int = 18):
+    """`brand_icon` wrapped as a QIcon (for QPushButton.setIcon)."""
+    QtGui, _ = _qt()
+    return QtGui.QIcon(brand_icon(name, size))

@@ -537,11 +537,14 @@ class LabeledToggle(QtWidgets.QFrame):
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
         lbl = QtWidgets.QLabel(label)
+        # Wrap long labels so the row never forces the page wider than the
+        # viewport (the control-panel pages live in a no-horizontal-scroll area).
+        lbl.setWordWrap(True)
         lbl.setStyleSheet(f"color:{theme.TEXT};background:transparent;")
         self._toggle = ToggleSwitch(checked)
         self._toggle.toggled.connect(self.toggled.emit)
         lay.addWidget(lbl, 1)
-        lay.addWidget(self._toggle)
+        lay.addWidget(self._toggle, 0, QtCore.Qt.AlignTop)
 
     def setChecked(self, on: bool) -> None:
         self._toggle.setChecked(on)

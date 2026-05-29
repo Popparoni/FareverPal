@@ -185,6 +185,38 @@ class LiveModel:
                     return (bid, True, None)
         return (bid, False, None)   # boss known (sticky) but not in scene now
 
+    HARD_LEVEL = 20     # Hard mode scales every dungeon to this level
+
+    def boss_level(self) -> int | None:
+        """Live level of the current dungeon boss, or None (offset uncalibrated or
+        boss not in scene). See core/attributes.level."""
+        bid = self.dungeon_boss
+        if not bid:
+            return None
+        for e in self.units():
+            if e.unit_id == bid:
+                try:
+                    return attributes.level(self.hl, e.addr)
+                except ProcError:
+                    return None
+        return None
+
+    def detected_mode(self) -> str | None:
+        """'hard' | 'normal' inferred from the live boss level vs its normal
+        (CDB) level — Hard scales the dungeon up. None if the live level can't be
+        read, so callers fall back to the manual mode selector."""
+        bid = self.dungeon_boss
+        if not bid:
+            return None
+        live = self.boss_level()
+        if live is None:
+            return None
+        info = udata.unit_info(bid)
+        normal = info.get("lvl") if info else None
+        if isinstance(normal, int):
+            return "hard" if live > normal else "normal"
+        return "hard" if live >= self.HARD_LEVEL else "normal"
+
     # --- loot resolution (deterministic + cached) ------------------------
     def chest_table(self, chest_id: str, default_table: str | None = None) -> str | None:
         """Resolve a chest's loot table. Non-boss chests are cached once (so they

@@ -29,7 +29,7 @@ from ..data import loot, names, tokens
 from ..data import icons
 from .. import __version__
 from .. import paths
-from ..api import FareverAPI
+from ..api import FareverAPI, oauth_login
 
 # nav: key, icon, label
 NAV = [
@@ -40,6 +40,7 @@ NAV = [
     ("loot", "box", "Loot"),
     ("crosshair", "crosshair", "Crosshair"),
     ("map", "map", "Map"),
+    ("friends", "users", "Friends"),
     ("log", "terminal", "Log"),
 ]
 CLASSES = ["Auto", "Warrior", "Rogue", "Mage", "Priest", "Off"]
@@ -81,6 +82,23 @@ class _LoginWorker(QtCore.QThread):
         self.done.emit(res)
 
 
+class _OAuthWorker(QtCore.QThread):
+    """Browser OAuth (Google/Discord) → bearer token (off the UI thread)."""
+    done = QtCore.Signal(dict)
+
+    def __init__(self, base_url: str, provider: str):
+        super().__init__()
+        self.base_url, self.provider = base_url, provider
+
+    def run(self):
+        res = oauth_login(self.base_url, self.provider)
+        if res.get("ok") and res.get("token"):
+            me = FareverAPI(self.base_url, res["token"]).me()
+            if me.get("ok") and isinstance(me.get("user"), dict):
+                res["user"] = me["user"]
+        self.done.emit(res)
+
+
 class _AvatarLoader(QtCore.QThread):
     """Download an avatar image off the UI thread. Emits a QPixmap (or None)."""
     done = QtCore.Signal(object)
@@ -100,6 +118,22 @@ class _AvatarLoader(QtCore.QThread):
             self.done.emit(pm if not pm.isNull() else None)
         except Exception:
             self.done.emit(None)
+
+
+class _FriendsWorker(QtCore.QThread):
+    """Off-thread: send a presence heartbeat, then fetch the friends list.
+    Emits the friends_list() result dict (with an extra 'share' echo)."""
+    done = QtCore.Signal(dict)
+
+    def __init__(self, base_url: str, token: str, share: bool):
+        super().__init__()
+        self.base_url, self.token, self.share = base_url, token, share
+
+    def run(self):
+        api = FareverAPI(self.base_url, self.token)
+        api.presence_ping(self.share)          # mark us "online (companion)"
+        res = api.friends_list()
+        self.done.emit(res if isinstance(res, dict) else {"ok": False})
 
 
 class LoginDialog(QtWidgets.QDialog):
@@ -127,6 +161,23 @@ class LoginDialog(QtWidgets.QDialog):
         sub.setWordWrap(True)
         v.addWidget(sub)
 
+        # One-click sign-in (opens the browser; account is created automatically).
+        self._oauth_worker: _OAuthWorker | None = None
+        # Solid brand fills with explicit foreground — high contrast, readable.
+        self.btn_google = self._provider_button(
+            "Continue with Google", "google", bg="#ffffff", fg="#1f2328", hover="#e8eaed",
+            icon=icons.brand_qicon("google-g", 18))
+        self.btn_discord = self._provider_button(
+            "Continue with Discord", "discord", bg="#5865f2", fg="#ffffff", hover="#4752c4",
+            icon=icons.ui_qicon("discord", "#ffffff", 18))
+        v.addWidget(self.btn_google)
+        v.addWidget(self.btn_discord)
+
+        div = QtWidgets.QLabel("or sign in with a password")
+        div.setObjectName("Muted")
+        div.setAlignment(QtCore.Qt.AlignCenter)
+        v.addWidget(div)
+
         self.user = QtWidgets.QLineEdit()
         self.user.setPlaceholderText("Username")
         v.addWidget(self.user)
@@ -148,16 +199,68 @@ class LoginDialog(QtWidgets.QDialog):
         self.btn.clicked.connect(self._submit)
         v.addWidget(self.btn)
 
-        # Web account creation / OAuth happen in the browser on the website.
         web = QtWidgets.QLabel(
-            "No account, or use Google/Discord? "
-            f"<a href='{self.s.api_base}/login.php' style='color:{theme.ACCENT};'>Sign up on the web</a>, "
-            "set a password, then sign in here.")
+            "Google/Discord create your account automatically. Prefer the website? "
+            f"<a href='{self.s.api_base}/login.php' style='color:{theme.ACCENT};'>Open farever-pals.com</a>.")
         web.setObjectName("Muted")
         web.setWordWrap(True)
         web.setOpenExternalLinks(False)
         web.linkActivated.connect(lambda u: webbrowser.open(u))
         v.addWidget(web)
+
+    def _provider_button(self, label: str, provider: str, *, bg: str, fg: str,
+                         hover: str, icon=None) -> QtWidgets.QPushButton:
+        b = QtWidgets.QPushButton(label)
+        b.setMinimumHeight(36)
+        b.setCursor(QtCore.Qt.PointingHandCursor)
+        if icon is not None:
+            b.setIcon(icon)
+            b.setIconSize(QtCore.QSize(18, 18))
+        # Don't let these grab the dialog's default-button highlight (that's what
+        # painted the first one solid yellow); the password "Sign in" stays default.
+        b.setAutoDefault(False)
+        b.setDefault(False)
+        b.setStyleSheet(
+            f"QPushButton{{background:{bg};color:{fg};border:none;font-weight:600;}}"
+            f"QPushButton:hover{{background:{hover};}}"
+            f"QPushButton:disabled{{background:{bg};color:{fg}99;}}")
+        b.clicked.connect(lambda: self._start_oauth(provider))
+        return b
+
+    def _set_oauth_busy(self, busy: bool, active: str = ""):
+        for prov, btn in (("google", self.btn_google), ("discord", self.btn_discord)):
+            btn.setEnabled(not busy)
+            base = f"Continue with {prov.capitalize()}"
+            btn.setText("Waiting for browser…" if (busy and prov == active) else base)
+        self.user.setEnabled(not busy)
+        self.pw.setEnabled(not busy)
+        self.btn.setEnabled(not busy)
+
+    def _start_oauth(self, provider: str):
+        if self._oauth_worker is not None:
+            return
+        self.err.hide()
+        self._set_oauth_busy(True, provider)
+        self._oauth_worker = _OAuthWorker(self.s.api_base, provider)
+        self._oauth_worker.done.connect(self._on_oauth_done)
+        self._oauth_worker.start()
+
+    def _on_oauth_done(self, res: dict):
+        self._oauth_worker = None
+        self._set_oauth_busy(False)
+        if res.get("ok") and res.get("token"):
+            self.result_token = res["token"]
+            self.result_user = res.get("user", {})
+            self.accept()
+            return
+        errs = {
+            "timeout": "Timed out waiting for the browser. Try again.",
+            "browser": "Could not open your browser. Sign in on the website instead.",
+            "loopback": "Couldn't open the local sign-in port. Try again.",
+            "unconfigured": "This sign-in method isn't enabled on the server yet.",
+            "network": "Could not reach farever-pals.com. Check your connection.",
+        }
+        self._show_err(errs.get(res.get("error", ""), "Sign-in failed. Please try again."))
 
     def _submit(self):
         u, p = self.user.text().strip(), self.pw.text()
@@ -203,6 +306,9 @@ class ControlPanel(QtWidgets.QMainWindow):
         self._overlay_cards: dict[str, list] = {}
         self._worker: _LocateWorker | None = None
         self._nav_items: dict[str, C.NavItem] = {}
+        # friends + presence
+        self._friends: list = []
+        self._friends_worker: _FriendsWorker | None = None
 
         self.setWindowTitle("Farever Pal — by Escanor")
         self.setMinimumSize(1000, 640)
@@ -224,6 +330,14 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.hotkeys = GlobalHotkeys(QtWidgets.QApplication.instance())
         self.hotkeys.triggered.connect(self._on_hotkey)
         self._register_hotkeys()
+
+        # Friends presence: heartbeat + list refresh while signed in (the app
+        # being open = "online (companion)"). Cheap; runs off the UI thread.
+        self._friends_timer = QtCore.QTimer(self)
+        self._friends_timer.setInterval(45_000)
+        self._friends_timer.timeout.connect(self._friends_poll)
+        self._refresh_friends_gating()
+
         self.log(f"Read-only. Memory backend: {backend_name()}. Press Attach "
                  "(unload Farever.CT first — it hooks the same site). The crosshair "
                  "needs no attach.")
@@ -343,6 +457,7 @@ class ControlPanel(QtWidgets.QMainWindow):
             self._acct_box.addWidget(btn)
         # Sign in/out flips auto-upload availability — refresh its gating.
         self._refresh_speedrun_gating()
+        self._refresh_friends_gating()
 
     def _account_avatar_pixmap(self, size: int) -> QtGui.QPixmap:
         """The downloaded avatar if we have it, else a sharp accent-tinted tile
@@ -534,6 +649,9 @@ class ControlPanel(QtWidgets.QMainWindow):
         for k, item in self._nav_items.items():
             item.setSelected(k == key)
         self.stack.setCurrentIndex(order.index(key))
+        # Freshen friend presence/list when opening a page that shows it.
+        if key in ("friends", "speedrun") and self.s.account_token:
+            self._friends_poll()
 
     # ====================================================================
     #  Pages
@@ -779,15 +897,25 @@ class ControlPanel(QtWidgets.QMainWindow):
     # ---- Loot -----------------------------------------------------------
     def _page_speedrun(self):
         page, v = self._page_container()
+
+        # --- Timer ---
+        v.addWidget(C.SectionHeader("Timer"))
         card = C.OverlayCard("timer", "Open Speedrun Timer",
                              "Big stopwatch — start/stop by hotkey, auto-stop on boss kill.")
         card.toggled.connect(lambda on: self._request_overlay("speedrun", on))
         self._register_card("speedrun", card)
         v.addWidget(card)
+        sc = C.SliderRow("Overlay scale", 70, 200, int(self.s.speedrun_scale * 100),
+                         lambda x: f"{x / 100:.2f}x")
+        sc.valueChanged.connect(self._set_speedrun_scale)
+        v.addWidget(sc)
 
+        # --- Automation + upload ---
+        v.addWidget(C.SectionHeader("Automation"))
         self._auto_toggle = C.LabeledToggle(
             "Auto Detect Boss Run  ·  detects the dungeon, starts on your first move, "
-            "stops on the boss kill", self.s.speedrun_auto)
+            "stops on the boss kill, and picks Normal/Hard from the boss level",
+            self.s.speedrun_auto)
         self._auto_toggle.toggled.connect(self._toggle_auto)
         v.addWidget(self._auto_toggle)
 
@@ -807,19 +935,36 @@ class ControlPanel(QtWidgets.QMainWindow):
             "Hard" if self.s.speedrun_mode == "hard" else "Normal")
         mode_seg.currentChanged.connect(
             lambda t: self._set("speedrun_mode", "hard" if t == "Hard" else "normal"))
-        v.addWidget(C.Field("Upload runs as", mode_seg))
+        v.addWidget(C.Field("Upload runs as (fallback)", mode_seg))
         mode_note = QtWidgets.QLabel(
-            "Set this to match the difficulty you're running — uploads post to the "
-            "matching leaderboard. (Auto-detection of Hard isn't wired up yet.)")
+            "Used when Auto Detect Boss Run is off, or when the live boss level can't "
+            "be read. With auto on, the boss's live level vs its normal level picks "
+            "Normal vs Hard for you.")
         mode_note.setObjectName("Muted")
         mode_note.setWordWrap(True)
         v.addWidget(mode_note)
 
-        sc = C.SliderRow("Overlay scale", 70, 200, int(self.s.speedrun_scale * 100),
-                         lambda x: f"{x / 100:.2f}x")
-        sc.valueChanged.connect(self._set_speedrun_scale)
-        v.addWidget(sc)
+        # --- Co-runners (add friends to the run) ---
+        self._corunner_head = C.SectionHeader("Add friends to this run")
+        v.addWidget(self._corunner_head)
+        co_intro = QtWidgets.QLabel(
+            "Picked friends ride along as co-runners on auto-uploaded runs — each "
+            "with their linked build. Manage who's your friend on the Friends tab.")
+        co_intro.setObjectName("Muted")
+        co_intro.setWordWrap(True)
+        v.addWidget(co_intro)
+        self._corunner_hint = QtWidgets.QLabel("")
+        self._corunner_hint.setObjectName("Muted")
+        self._corunner_hint.setWordWrap(True)
+        v.addWidget(self._corunner_hint)
+        self._corunner_host = QtWidgets.QWidget()
+        self._corunner_box = QtWidgets.QVBoxLayout(self._corunner_host)
+        self._corunner_box.setContentsMargins(0, 0, 0, 0)
+        self._corunner_box.setSpacing(8)
+        v.addWidget(self._corunner_host)
+        self._render_corunners()
 
+        # --- Hotkeys ---
         v.addWidget(C.SectionHeader("Hotkeys (global · work while in-game)"))
         hk = QtWidgets.QGridLayout()
         hk.setHorizontalSpacing(12)
@@ -835,6 +980,8 @@ class ControlPanel(QtWidgets.QMainWindow):
             hk.addWidget(C.Field(label, edit), 0, i)
         v.addLayout(hk)
 
+        # --- About / fair play ---
+        v.addWidget(C.SectionHeader("About"))
         note = QtWidgets.QLabel(
             "Start at the run's begin; it auto-stops when the dungeon boss dies "
             "(or stop manually). Best time is kept per boss.")
@@ -858,6 +1005,59 @@ class ControlPanel(QtWidgets.QMainWindow):
         v.addWidget(clr)
         v.addStretch(1)
         return page
+
+    def _corunner_row(self, f: dict) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("Cell")
+        lay = QtWidgets.QHBoxLayout(frame)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(10)
+        name = QtWidgets.QLabel(f.get("username", "?"))
+        name.setStyleSheet(f"color:{theme.TEXT};background:transparent;")
+        code = f.get("public_id", "")
+        lay.addWidget(name, 1)
+        lay.addWidget(self._presence_pill(f.get("presence", "offline")))
+        tog = C.ToggleSwitch(code in (self.s.speedrun_corunners or []))
+        tog.toggled.connect(lambda on, c=code: self._toggle_corunner(c, on))
+        lay.addWidget(tog)
+        return frame
+
+    def _render_corunners(self):
+        if not hasattr(self, "_corunner_box"):
+            return
+        while self._corunner_box.count():
+            it = self._corunner_box.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        signed = bool(self.s.account_token)
+        if not signed:
+            self._corunner_hint.setText("Sign in to pick friends as co-runners.")
+            self._corunner_hint.setVisible(True)
+            self._corunner_host.setVisible(False)
+            return
+        if not self._friends:
+            self._corunner_hint.setText("No friends yet — add some on the Friends tab.")
+            self._corunner_hint.setVisible(True)
+            self._corunner_host.setVisible(False)
+            return
+        self._corunner_hint.setVisible(False)
+        self._corunner_host.setVisible(True)
+        for fr in self._friends:
+            self._corunner_box.addWidget(self._corunner_row(fr))
+        n = len(self.s.speedrun_corunners or [])
+        self._corunner_head.set_tag(f"{n} PICKED" if n else "")
+
+    def _toggle_corunner(self, code: str, on: bool):
+        cur = list(self.s.speedrun_corunners or [])
+        if on and code not in cur:
+            cur.append(code)
+        elif not on and code in cur:
+            cur.remove(code)
+        self._set("speedrun_corunners", cur)
+        if hasattr(self, "_corunner_head"):
+            n = len(cur)
+            self._corunner_head.set_tag(f"{n} PICKED" if n else "")
 
     def _toggle_auto(self, on: bool):
         self._set("speedrun_auto", on)
@@ -895,6 +1095,217 @@ class ControlPanel(QtWidgets.QMainWindow):
         if ov is not None:
             ov._render()
         self.log("Speedrun best times cleared.")
+
+    # ---- Friends --------------------------------------------------------
+    def _page_friends(self):
+        page, v = self._page_container()
+        v.addWidget(C.SectionHeader("Friends", tag="ONLINE STATUS"))
+
+        intro = QtWidgets.QLabel(
+            "Your Farever Pal friends and whether they're online. Add or accept "
+            "friends on the website — they appear here automatically.")
+        intro.setObjectName("Muted")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+
+        # --- signed-out prompt ---
+        self._friends_signedout = QtWidgets.QFrame()
+        self._friends_signedout.setObjectName("Card")
+        so = QtWidgets.QVBoxLayout(self._friends_signedout)
+        so.setContentsMargins(16, 16, 16, 16)
+        so.setSpacing(10)
+        so_lbl = QtWidgets.QLabel("Sign in to your Farever Pal account to see your "
+                                  "friends and share your online status.")
+        so_lbl.setObjectName("Muted")
+        so_lbl.setWordWrap(True)
+        so_btn = QtWidgets.QPushButton("Sign in")
+        so_btn.setObjectName("Accent")
+        so_btn.setMinimumHeight(32)
+        so_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        so_btn.clicked.connect(self._open_login)
+        so.addWidget(so_lbl)
+        so.addWidget(so_btn, 0, QtCore.Qt.AlignLeft)
+        v.addWidget(self._friends_signedout)
+
+        # --- signed-in content ---
+        self._friends_main = QtWidgets.QWidget()
+        fm = QtWidgets.QVBoxLayout(self._friends_main)
+        fm.setContentsMargins(0, 0, 0, 0)
+        fm.setSpacing(12)
+
+        self._share_toggle = C.LabeledToggle(
+            "Share my online status with friends", self.s.share_presence)
+        self._share_toggle.toggled.connect(self._toggle_share_presence)
+        fm.addWidget(self._share_toggle)
+
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(8)
+        self._friends_refresh_btn = QtWidgets.QPushButton("Refresh")
+        self._friends_refresh_btn.setObjectName("Outline")
+        self._friends_refresh_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._friends_refresh_btn.clicked.connect(lambda: self._friends_poll(force=True))
+        manage = QtWidgets.QPushButton("Manage on web")
+        manage.setObjectName("Outline")
+        manage.setCursor(QtCore.Qt.PointingHandCursor)
+        manage.clicked.connect(lambda: webbrowser.open(f"{self.s.api_base}/friends.php"))
+        actions.addWidget(self._friends_refresh_btn)
+        actions.addWidget(manage)
+        actions.addStretch(1)
+        self._friends_pending = QtWidgets.QLabel("")
+        self._friends_pending.setObjectName("Mono")
+        self._friends_pending.setStyleSheet(
+            f"color:{theme.GOLD};background:transparent;")
+        actions.addWidget(self._friends_pending)
+        fm.addLayout(actions)
+
+        fm.addWidget(C.SectionHeader("Friend list"))
+        self._friends_list_host = QtWidgets.QWidget()
+        self._friends_list_box = QtWidgets.QVBoxLayout(self._friends_list_host)
+        self._friends_list_box.setContentsMargins(0, 0, 0, 0)
+        self._friends_list_box.setSpacing(8)
+        fm.addWidget(self._friends_list_host)
+
+        self._friends_empty = QtWidgets.QLabel(
+            "No friends yet — add some on the website with their friend code.")
+        self._friends_empty.setObjectName("Muted")
+        self._friends_empty.setWordWrap(True)
+        fm.addWidget(self._friends_empty)
+
+        v.addWidget(self._friends_main)
+        v.addStretch(1)
+        self._render_friends()
+        return page
+
+    def _presence_pill(self, state: str) -> QtWidgets.QWidget:
+        color, label = {
+            "companion": (theme.GOOD, "In-game"),
+            "web": (theme.ACCENT, "Online (web)"),
+        }.get(state, (theme.MUTED, "Offline"))
+        w = QtWidgets.QWidget()
+        w.setStyleSheet("background:transparent;")
+        lay = QtWidgets.QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        dot = QtWidgets.QFrame()
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet(f"background:{color};border:0;")
+        lbl = QtWidgets.QLabel(label)
+        lbl.setStyleSheet(
+            f"color:{color};font-family:'{theme.MONO_FONT}','Consolas';"
+            "font-size:11px;background:transparent;")
+        lay.addWidget(dot)
+        lay.addWidget(lbl)
+        return w
+
+    def _initial_tile(self, name: str, size: int) -> QtGui.QPixmap:
+        pm = QtGui.QPixmap(size, size)
+        pm.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        fill = QtGui.QColor(theme.ACCENT); fill.setAlpha(38)
+        edge = QtGui.QColor(theme.ACCENT); edge.setAlpha(120)
+        p.fillRect(0, 0, size, size, fill)
+        p.setPen(edge)
+        p.drawRect(0, 0, size - 1, size - 1)
+        p.setPen(QtGui.QColor(theme.ACCENT))
+        f = QtGui.QFont(theme.UI_FONT)
+        f.setBold(True)
+        f.setPointSize(max(8, int(size * 0.4)))
+        p.setFont(f)
+        p.drawText(pm.rect(), QtCore.Qt.AlignCenter, (name[:1] or "?").upper())
+        p.end()
+        return pm
+
+    def _friend_row(self, f: dict) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("Cell")
+        lay = QtWidgets.QHBoxLayout(frame)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(12)
+        av = QtWidgets.QLabel()
+        av.setFixedSize(34, 34)
+        av.setPixmap(self._initial_tile(f.get("username", ""), 34))
+        col = QtWidgets.QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(2)
+        name = QtWidgets.QLabel(f.get("username", "?"))
+        name.setStyleSheet(f"color:{theme.TEXT};font-weight:600;background:transparent;")
+        code = QtWidgets.QLabel(f.get("public_id", ""))
+        code.setObjectName("Mono")
+        code.setStyleSheet(
+            f"color:{theme.MUTED};font-family:'{theme.MONO_FONT}','Consolas';"
+            "font-size:10px;background:transparent;")
+        col.addWidget(name)
+        col.addWidget(code)
+        lay.addWidget(av)
+        lay.addLayout(col, 1)
+        lay.addWidget(self._presence_pill(f.get("presence", "offline")))
+        view = QtWidgets.QPushButton("View")
+        view.setObjectName("Outline")
+        view.setCursor(QtCore.Qt.PointingHandCursor)
+        code_str = f.get("public_id", "")
+        view.clicked.connect(lambda _=False, c=code_str: webbrowser.open(f"{self.s.api_base}/u.php?c={c}"))
+        lay.addWidget(view)
+        return frame
+
+    def _render_friends(self):
+        if not hasattr(self, "_friends_main"):
+            return
+        signed = bool(self.s.account_token)
+        self._friends_signedout.setVisible(not signed)
+        self._friends_main.setVisible(signed)
+        if not signed:
+            return
+        # rebuild the friend rows
+        while self._friends_list_box.count():
+            it = self._friends_list_box.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        for fr in self._friends:
+            self._friends_list_box.addWidget(self._friend_row(fr))
+        self._friends_empty.setVisible(not self._friends)
+        self._friends_list_host.setVisible(bool(self._friends))
+
+    def _refresh_friends_gating(self):
+        """Start/stop presence polling with sign-in state; refresh the page."""
+        if not hasattr(self, "_friends_timer"):
+            return
+        if self.s.account_token:
+            if not self._friends_timer.isActive():
+                self._friends_timer.start()
+            self._friends_poll(force=True)
+        else:
+            self._friends_timer.stop()
+            self._friends = []
+        self._render_friends()
+        self._render_corunners()
+
+    def _friends_poll(self, force: bool = False):
+        if not self.s.account_token:
+            return
+        if self._friends_worker is not None and self._friends_worker.isRunning():
+            return
+        self._friends_worker = _FriendsWorker(
+            self.s.api_base, self.s.account_token, bool(self.s.share_presence))
+        self._friends_worker.done.connect(self._on_friends_done)
+        self._friends_worker.start()
+
+    def _on_friends_done(self, res: dict):
+        self._friends_worker = None
+        if not res.get("ok"):
+            return
+        self._friends = res.get("friends") or []
+        n = int(res.get("incoming_count") or 0)
+        if hasattr(self, "_friends_pending"):
+            self._friends_pending.setText(
+                f"{n} pending request{'s' if n != 1 else ''}" if n else "")
+        self._render_friends()
+        self._render_corunners()
+
+    def _toggle_share_presence(self, on: bool):
+        self._set("share_presence", on)
+        self._friends_poll(force=True)   # push the new flag to the server now
 
     def _page_loot(self):
         page, v = self._page_container()
@@ -1383,6 +1794,12 @@ class ControlPanel(QtWidgets.QMainWindow):
     def closeEvent(self, e):
         try:
             self.hotkeys.clear()
+        except Exception:
+            pass
+        try:
+            self._friends_timer.stop()
+            if self._friends_worker is not None and self._friends_worker.isRunning():
+                self._friends_worker.wait(1500)
         except Exception:
             pass
         self.detach()

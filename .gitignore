@@ -38,3 +38,8 @@ id_rsa*
 .idea/
 Thumbs.db
 desktop.ini
+
+# --- internal / scratch (never publish) ---
+_re_*.py
+notes/
+PLAN.md

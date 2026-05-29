@@ -41,6 +41,10 @@ class SpeedrunOverlay(OverlayWindow):
         self._move_base = None                  # baseline xyz once armed inside a dungeon
         self._last_pos = None                   # previous tick xyz (to reject teleports)
         self._uploaded = False                  # guard: one upload per finished run
+        self._run_mode: str | None = None       # difficulty captured at finish
+        self._run_mode_src: str | None = None    # "auto" (read from boss level) | "manual"
+        self._live_mode: str | None = None       # difficulty resolved live (for the HUD readout)
+        self._live_mode_src: str | None = None
 
         # dungeon-instance icon, shown next to the panel header when detected
         self._dg_icon = QtWidgets.QLabel()
@@ -68,6 +72,15 @@ class SpeedrunOverlay(OverlayWindow):
         self.state_lbl.setObjectName("Mono")
         self.state_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self.content.addWidget(self.state_lbl)
+
+        # Difficulty readout — shows what a finished run will upload as, and whether
+        # it was read from the live boss level ("detected") or is the manual
+        # fallback ("manual", tinted gold so a guess is never mistaken for a read).
+        self.mode_lbl = QtWidgets.QLabel("")
+        self.mode_lbl.setObjectName("Mono")
+        self.mode_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.mode_lbl.hide()
+        self.content.addWidget(self.mode_lbl)
 
         self.pb_lbl = QtWidgets.QLabel("no record yet")
         self.pb_lbl.setObjectName("Mono")
@@ -110,6 +123,8 @@ class SpeedrunOverlay(OverlayWindow):
         self._move_base = None
         self._last_pos = None
         self._uploaded = False
+        self._run_mode = None
+        self._run_mode_src = None
         self.upload_lbl.hide()
         self._upload_btn.hide()
         self._render()
@@ -149,10 +164,14 @@ class SpeedrunOverlay(OverlayWindow):
                 self._dungeon_bid = bid
             self._in_dungeon = bool(present)
             self._update_dungeon_icon()
+            # Refresh the live difficulty readout (cheap: a single boss-level read).
+            self._live_mode, self._live_mode_src = self._resolve_mode()
 
-        # Auto-stop on boss kill (feed the boss every tick while running).
+        # Auto-stop on boss kill, or CANCEL if the player left the dungeon (the
+        # boss despawning at full HP — e.g. going to the main menu — is not a kill).
         if running and boss is not None:
-            t.feed_boss(*boss)
+            if t.feed_boss(*boss) == t.LEFT:
+                self._on_run_aborted()
 
         # Auto-start: only INSIDE a dungeon, and only on real physical movement.
         if t.state == t.READY and self.model is not None:
@@ -164,9 +183,13 @@ class SpeedrunOverlay(OverlayWindow):
             self.upload_lbl.hide()
             self._upload_btn.hide()
 
-        # Run just finished → record PB + (optionally) upload.
+        # Run just finished → capture difficulty (boss still in scene), PB, upload.
+        # PB + auto-upload only count a CONFIRMED kill (a manual stop without a
+        # kill must never set a bogus PB or auto-submit).
         if t.state == t.DONE and self._prev_state != t.DONE:
-            self._record_best()
+            self._run_mode, self._run_mode_src = self._resolve_mode()
+            if t.is_kill:
+                self._record_best()
             self._maybe_upload()
 
         self._prev_state = t.state
@@ -232,7 +255,9 @@ class SpeedrunOverlay(OverlayWindow):
             self.timer.is_new_best = True
 
     def _maybe_upload(self):
-        """On finish: auto-upload if enabled, else offer a manual Upload button."""
+        """On finish: auto-upload ONLY a confirmed boss kill (and only if enabled);
+        otherwise offer a manual Upload button. A finish without a detected kill
+        (a manual stop, or anything that wasn't a real kill) is never auto-sent."""
         if self._uploaded:
             return
         bid = self.timer.boss_id or self._dungeon_bid
@@ -243,10 +268,47 @@ class SpeedrunOverlay(OverlayWindow):
             self.upload_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
             self.upload_lbl.show()
             return
+        if not self.timer.is_kill:
+            # finished without a detected kill — never auto-submit; let the user
+            # decide via the manual button (the leaderboard also screens times).
+            self.upload_lbl.setText("no boss kill detected — upload manually if this was a real run")
+            self.upload_lbl.setStyleSheet(f"color:{theme.GOLD};background:transparent;")
+            self.upload_lbl.show()
+            self._upload_btn.show()
+            return
         if self.s.speedrun_auto_upload:
             self._do_upload()
         else:
             self._upload_btn.show()   # manual: user clicks to upload
+
+    def _on_run_aborted(self):
+        """Player left the dungeon / hit the main menu mid-run: cancel the run
+        without recording a time or uploading anything."""
+        self.timer.reset()
+        self._move_base = None
+        self._last_pos = None
+        self._uploaded = False
+        self._run_mode = None
+        self._run_mode_src = None
+        self._upload_btn.hide()
+        self.upload_lbl.setText("run cancelled — left the dungeon (no upload)")
+        self.upload_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
+        self.upload_lbl.show()
+
+    def _resolve_mode(self) -> tuple[str, str]:
+        """(difficulty, source) to upload as. source is "auto" when read from the
+        live boss level (Auto Detect Boss Run on + level readable), else "manual"
+        — the fallback selector, used when auto is off OR the level can't be read
+        (e.g. the level offset isn't calibrated on this build)."""
+        if self.s.speedrun_auto and self.model is not None:
+            try:
+                m = self.model.detected_mode()
+            except Exception:
+                m = None
+            if m in ("normal", "hard"):
+                return m, "auto"
+        mode = self.s.speedrun_mode if self.s.speedrun_mode in ("normal", "hard") else "normal"
+        return mode, "manual"
 
     def _do_upload(self):
         """Push the finished run to the web leaderboard (background thread)."""
@@ -258,13 +320,15 @@ class SpeedrunOverlay(OverlayWindow):
         self._upload_btn.hide()
         slug, time_ms = bid.lower(), int(round(last * 1000))
         base, token = self.s.api_base, self.s.account_token
-        mode = self.s.speedrun_mode if self.s.speedrun_mode in ("normal", "hard") else "normal"
-        self.upload_lbl.setText("uploading…")
+        mode = self._run_mode or self._resolve_mode()[0]
+        src = self._run_mode_src or "manual"
+        self.upload_lbl.setText(f"uploading… ({mode} · {src})")
         self.upload_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
         self.upload_lbl.show()
 
+        co_runners = list(self.s.speedrun_corunners or [])
         def work():
-            res = FareverAPI(base, token).submit_run(slug, time_ms, mode=mode)
+            res = FareverAPI(base, token).submit_run(slug, time_ms, mode=mode, co_runners=co_runners)
             if res.get("ok"):
                 msg = "uploaded · pending review" if res.get("flagged") else "uploaded · live ✓"
             else:
@@ -299,6 +363,7 @@ class SpeedrunOverlay(OverlayWindow):
         boss = names.unit_name(t.boss_id) if t.boss_id else "—"
         label = {t.READY: "READY", t.RUNNING: "RUNNING", t.DONE: "FINISHED"}[t.state]
         self.state_lbl.setText(f"{label}   ·   {boss}")
+        self._render_mode()
 
         bid = t.boss_id or "_"
         best = self.s.speedrun_best.get(bid)
@@ -310,6 +375,32 @@ class SpeedrunOverlay(OverlayWindow):
         if t.last is not None:
             parts.append(f"LAST {fmt_time(t.last)}")
         self.pb_lbl.setText("   ·   ".join(parts) or "no record yet")
+
+    def _render_mode(self):
+        """The difficulty readout: what a finished run uploads as + how it was
+        resolved. After a finish it shows the captured value; otherwise the live
+        one. Hidden when there's no dungeon context to talk about."""
+        t = self.timer
+        if t.state == t.DONE and self._run_mode:
+            mode, src = self._run_mode, (self._run_mode_src or "manual")
+        else:
+            mode, src = self._live_mode, self._live_mode_src
+        # Nothing detected yet, or fully manual stopwatch with no boss in sight.
+        if not mode or not (self._dungeon_bid or t.boss_id):
+            self.mode_lbl.hide()
+            return
+        if src == "auto":
+            tag, color = "detected", (self.s.hud_accent or theme.ACCENT)
+            tip = "Difficulty read from the live boss level."
+        else:
+            tag, color = "manual", theme.GOLD
+            tip = ("Manual fallback — the live boss level can't be read on this "
+                   "build (level offset not calibrated), so the Upload-as selector "
+                   "in the control panel is used. Set it to match your run.")
+        self.mode_lbl.setText(f"{mode.upper()}  ·  {tag}")
+        self.mode_lbl.setStyleSheet(f"color:{color};background:transparent;")
+        self.mode_lbl.setToolTip(tip)
+        self.mode_lbl.show()
 
     def closeEvent(self, e):
         self._poll.stop()

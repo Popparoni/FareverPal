@@ -6,9 +6,14 @@ thread. Every method returns the decoded JSON dict; on any failure it returns
 """
 from __future__ import annotations
 
+import http.server
 import json
+import secrets
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+import webbrowser
 
 
 class FareverAPI:
@@ -58,8 +63,10 @@ class FareverAPI:
         return self._request("GET", "/api/categories.php")
 
     def submit_run(self, category: str, time_ms: int, mode: str = "normal",
-                   video_url: str = "", title: str = "", notes: str = "", server: str = "") -> dict:
-        """-> {ok, id, status, flagged, flag_reason}."""
+                   video_url: str = "", title: str = "", notes: str = "", server: str = "",
+                   co_runners: list | None = None) -> dict:
+        """-> {ok, id, status, flagged, flag_reason}. `co_runners` = friend codes
+        (FRVR-XXXX-XXXX); the server links each co-runner's featured build."""
         return self._request("POST", "/api/speedrun/submit.php", {
             "category": category,
             "time_ms": int(time_ms),
@@ -68,9 +75,107 @@ class FareverAPI:
             "title": title,
             "notes": notes,
             "server": server,
+            "co_runners": list(co_runners or []),
         }, auth=True)
 
     def edit_run(self, run_id: int, **fields) -> dict:
         body = {"id": int(run_id)}
         body.update({k: v for k, v in fields.items() if k in ("video_url", "title", "notes")})
         return self._request("POST", "/api/speedrun/edit.php", body, auth=True)
+
+    # ---- friends + presence -------------------------------------------
+    def friends_list(self) -> dict:
+        """-> {ok, friends:[{public_id, username, avatar_url, presence, ...}], incoming_count}."""
+        return self._request("GET", "/api/friends/list.php", auth=True)
+
+    def presence_ping(self, share: bool | None = None) -> dict:
+        """Heartbeat so friends see us 'in-game'. `share` (optional) sets the
+        hideable 'share my online status' flag server-side. -> {ok, share_presence}."""
+        body: dict = {}
+        if share is not None:
+            body["share"] = bool(share)
+        return self._request("POST", "/api/presence/ping.php", body, auth=True)
+
+
+# --- OAuth (Google / Discord) sign-in, loopback flow ----------------------
+# The native-app pattern (RFC 8252): open the system browser to the web's OAuth
+# bridge, which runs the normal provider consent against farever-pals.com's
+# registered redirect_uri, then hands a companion API token back to a one-shot
+# HTTP server we run on 127.0.0.1. The provider never sees localhost; only the
+# final web -> app hop is local. `state` ties the browser flow to this server so
+# a stray local process can't inject a token.
+
+_OAUTH_OK_HTML = (
+    b"<!doctype html><meta charset=utf-8><title>Farever Pal</title>"
+    b"<style>html{background:#0e0f13;color:#e5e7eb;font:15px/1.5 system-ui,sans-serif}"
+    b"div{max-width:420px;margin:18vh auto;text-align:center;padding:0 24px}"
+    b"b{color:#38bdf8}</style>"
+    b"<div><h2><b>Signed in.</b></h2><p>You can close this tab and return to "
+    b"Farever Pal.</p></div>"
+)
+_OAUTH_ERR_HTML = (
+    b"<!doctype html><meta charset=utf-8><title>Farever Pal</title>"
+    b"<style>html{background:#0e0f13;color:#e5e7eb;font:15px/1.5 system-ui,sans-serif}"
+    b"div{max-width:420px;margin:18vh auto;text-align:center;padding:0 24px}"
+    b"b{color:#f0556b}</style>"
+    b"<div><h2><b>Sign-in failed.</b></h2><p>Close this tab and try again from "
+    b"Farever Pal.</p></div>"
+)
+
+
+def oauth_login(base_url: str, provider: str, timeout: float = 180.0) -> dict:
+    """Run the browser OAuth flow for `provider` ('google'|'discord').
+
+    Returns {ok: True, token} on success, else {ok: False, error}. Blocking —
+    call off the UI thread.
+    """
+    base = (base_url or "https://farever-pals.com").rstrip("/")
+    state = secrets.token_urlsafe(16)
+    result: dict = {}
+    done = threading.Event()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (stdlib name)
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if (params.get("state") or [""])[0] != state:
+                # favicon / stray hit — ignore, keep waiting for the real callback
+                self.send_response(204)
+                self.end_headers()
+                return
+            token = (params.get("token") or [""])[0]
+            if token:
+                result["token"] = token
+            else:
+                result["error"] = (params.get("error") or ["oauth"])[0]
+            body = _OAUTH_OK_HTML if token else _OAUTH_ERR_HTML
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except OSError:
+                pass
+            done.set()
+
+        def log_message(self, *_a):  # silence the default stderr logging
+            pass
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError:
+        return {"ok": False, "error": "loopback"}
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = (f"{base}/api/oauth/companion.php?provider={urllib.parse.quote(provider)}"
+               f"&port={port}&state={urllib.parse.quote(state)}")
+        if not webbrowser.open(url):
+            return {"ok": False, "error": "browser"}
+        if not done.wait(timeout):
+            return {"ok": False, "error": "timeout"}
+    finally:
+        server.shutdown()
+    if result.get("token"):
+        return {"ok": True, "token": result["token"]}
+    return {"ok": False, "error": result.get("error", "oauth")}

@@ -87,14 +87,17 @@ class Settings:
     speedrun_scale: float = 1.0
     speedrun_best: dict = field(default_factory=dict)  # boss unit_id -> best seconds
     # speedrun automation — ONE master toggle: detect the dungeon (boss in scene),
-    # auto-start the timer on the player's first move, and auto-stop on boss kill.
+    # auto-start the timer on the player's first move, auto-stop on boss kill, AND
+    # auto-detect the Normal/Hard difficulty from the live boss level (Hard scales
+    # the dungeon to lvl 20, so live boss level > its normal level = Hard).
     speedrun_auto: bool = True
     # auto-upload finished runs to the web leaderboard (needs login + speedrun_auto;
     # when off, the overlay shows a manual Upload button after a finished run).
     speedrun_auto_upload: bool = False
-    # which difficulty finished runs are uploaded as ("normal" | "hard"); manual
-    # selector since the live boss level (lvl 20 = hard) isn't reliably read yet.
-    # Defaults to hard — that's the difficulty most speedruns are run on.
+    # difficulty finished runs are uploaded as ("normal" | "hard"). Used as the
+    # FALLBACK when Auto Detect Boss Run is off, or when the live boss level can't
+    # be read (offset uncalibrated). Defaults to hard — the difficulty most
+    # speedruns are run on.
     speedrun_mode: str = "hard"
     # --- web account (Farever Pal site link) ---
     api_base: str = "https://farever-pals.com"   # web platform base URL
@@ -102,6 +105,10 @@ class Settings:
     account_code: str = ""                       # friend code (FRVR-XXXX-XXXX), for display
     account_token: str = ""                      # API bearer token (stored locally)
     account_avatar: str = ""                     # avatar image URL (for the top-right account button)
+    # --- friends + presence ---
+    share_presence: bool = True                  # broadcast "online (companion)" to friends (hideable)
+    # friend codes (FRVR-XXXX-XXXX) pre-picked as co-runners for the NEXT auto-uploaded run
+    speedrun_corunners: list = field(default_factory=list)
     # window geometry (per window key -> "x,y")
     geometry: dict = field(default_factory=dict)
     # collectibles marked done (set of ids, stored as list)
