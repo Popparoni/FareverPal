@@ -22,6 +22,24 @@ from ctypes import wintypes
 from typing import Callable
 
 from .proc import ProcError
+# config imports only stdlib (no core/Qt imports) -> no circular import.
+from ..config import hook_locate_enabled
+
+# Authoritative read-only gate. Even if a caller (e.g. model.py's locator
+# ternary) is edited to select the write-hook path unconditionally, no write to
+# the game can occur unless the hook is explicitly opted in via
+# FAREVER_ENABLE_HOOK=1. This is the defense-in-depth backstop that makes it
+# impossible to silently ship the write-hook as the default: the write path
+# fails LOUD instead of injecting silently. See config.hook_locate_enabled.
+_HOOK_DISABLED_MSG = (
+    "refusing to write to game process: code hook requires FAREVER_ENABLE_HOOK=1; "
+    "the companion is read-only by default")
+
+
+def _ensure_hook_allowed() -> None:
+    """Raise unless the write-hook is explicitly enabled (read-only default)."""
+    if not hook_locate_enabled():
+        raise RuntimeError(_HOOK_DISABLED_MSG)
 
 # --- Win32 -----------------------------------------------------------------
 MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, MEM_FREE = 0x1000, 0x2000, 0x8000, 0x10000
@@ -87,6 +105,10 @@ class Injector:
     read-only Rust reader so reads never share a writable handle."""
 
     def __init__(self, pid: int):
+        # Authoritative gate: never open a write handle to the game unless the
+        # hook is explicitly enabled. This is the chokepoint where the
+        # PROCESS_VM_WRITE handle would be acquired.
+        _ensure_hook_allowed()
         self.pid = pid
         access = (PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ
                   | PROCESS_QUERY_INFORMATION)
@@ -191,6 +213,11 @@ class Hook:
     def enable(self) -> None:
         if self.active:
             return
+        # Authoritative gate at the write chokepoint: this method patches the
+        # game's code. Refuse unless the hook is explicitly enabled, so even a
+        # caller that bypasses the model.py/config.py selection still cannot
+        # write silently.
+        _ensure_hook_allowed()
         self.original = self.proc.read(self.hook_addr, self.stolen_len)
         self.tramp_addr = self.injector.alloc_near(self.hook_addr, 0x1000)
         try:
