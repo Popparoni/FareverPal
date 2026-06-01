@@ -1,0 +1,56 @@
+# Build-verification CI for FareverPal.
+#
+# Builds the native Rust extension, runs the headless tests, and packages the
+# one-file exe on Windows, uploading it as a build-verification artifact.
+#
+# NOTE: this is build verification only. The data-dependent tests self-skip
+# because the game-data sheets live in a separate PRIVATE monorepo that isn't
+# checked out here; full RELEASES (with those sheets bundled) are built and cut
+# separately from the monorepo (see release.ps1). This workflow guarantees the
+# code compiles, the read-only-default tests pass, and the exe packages.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+      RUSTFLAGS: '--remap-path-prefix=${{ github.workspace }}=.'
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build native extension (maturin develop)
+        run: python -m maturin develop --release -m native/Cargo.toml
+
+      - name: Build native extension (cargo release)
+        run: cargo build --release --manifest-path native/Cargo.toml
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Package one-file exe
+        run: pyinstaller --noconfirm FareverPal.spec
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FareverPal-exe
+          path: dist/FareverPal.exe
+          if-no-files-found: error

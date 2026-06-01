@@ -1,5 +1,24 @@
 """Boss detection + unit loot resolution (headless)."""
+import pytest
+
+from farever_companion import paths
 from farever_companion.data import units, rarity
+
+
+def _game_data_present() -> bool:
+    """True if the monorepo CDB sheets are reachable (data/sheets/lootTable.json
+    marker resolves). False in CI, which checks out only this repo without the
+    private monorepo -> these data-dependent tests skip. They still run locally
+    where the monorepo data is present (assertions unchanged)."""
+    try:
+        return (paths.sheets_dir() / "lootTable.json").exists()
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _game_data_present(),
+    reason="requires monorepo game data (data/sheets/*.json)")
 
 
 def test_named_bosses_are_the_ten():
