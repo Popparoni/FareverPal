@@ -19,10 +19,16 @@ Key properties:
 """
 import os
 
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import get_module_file_attribute
 
 # --- the native memory reader (built by maturin into the env) --------------
-binaries = collect_dynamic_libs("farever_native")
+# collect_dynamic_libs() returns an empty list for single-file .pyd modules,
+# so we collect the extension explicitly instead.
+try:
+    _native = get_module_file_attribute("farever_native")
+    binaries = [(_native, ".")] if _native else []
+except Exception:
+    binaries = []
 
 # --- data: in-repo assets (always present) ---------------------------------
 datas = [
@@ -39,11 +45,12 @@ datas = [
 # the CDB sheets + wiki data + icons, while CI (which checks out only this repo,
 # without the monorepo) still builds successfully without them. notes/ is never
 # included here.
-for src, dst in (
-    ("../data/sheets", "data/sheets"),
-    ("../htdocs/assets/icons", "htdocs/assets/icons"),
-    ("../htdocs/assets/data", "htdocs/assets/data"),
+for _rel, dst in (
+    (os.path.join("..", "data", "sheets"), "data/sheets"),
+    (os.path.join("..", "htdocs", "assets", "icons"), "htdocs/assets/icons"),
+    (os.path.join("..", "htdocs", "assets", "data"), "htdocs/assets/data"),
 ):
+    src = os.path.join(SPECPATH, _rel)
     if os.path.exists(src):
         datas.append((src, dst))
 
@@ -100,7 +107,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=["farever_native"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

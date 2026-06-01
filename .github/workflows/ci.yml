@@ -39,9 +39,6 @@ jobs:
       - name: Build native extension (maturin develop)
         run: python -m maturin develop --release -m native/Cargo.toml
 
-      - name: Build native extension (cargo release)
-        run: cargo build --release --manifest-path native/Cargo.toml
-
       - name: Run tests
         run: pytest -v
 
