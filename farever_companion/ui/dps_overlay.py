@@ -1,9 +1,9 @@
-"""DPS meter overlay (Tactical Overlay HUD).
+"""DPS meter overlay — the headline panel.
 
-Big live DPS, a sparkline, and a per-skill breakdown when the DamageDisplay
-event source is active (crit% shown in gold), else per-target bars (HP-diff).
-Bosses are always counted regardless of range (model.sample_combat handles
-that). Self DPS only — by design (see PLAN §10). Read-only.
+Big live DPS, a sparkline, a survivability strip (incoming DTPS, own HP, death
+recap), and reviewable recent-cycle history with a local personal-best parse per
+boss. The per-skill breakdown lives in its own Skills panel (skill_overlay.py) so
+this stays uncrowded. Self DPS only (see PLAN §10). Read-only.
 """
 from __future__ import annotations
 
@@ -16,52 +16,15 @@ from . import theme
 from .overlay_base import OverlayWindow
 from .widgets import Sparkline, Bar
 from .components import SectionHeader
+from .skill_table import abbr as _abbr, SkillRow
 from ..data import names, icons
+from ..combat import encounter as enc_mod
 
 POLL_MS = 400
 HIST = 80
-N_BARS = 6
 N_CYCLES = 6
+N_ENEMY = 5             # by-enemy-type breakdown rows (HP-diff)
 IDLE_GAP = 3.0          # encounter ends after this long with no new damage
-
-
-def _abbr(v: float) -> str:
-    v = float(v)
-    return f"{v / 1000:.1f}K" if v >= 1000 else f"{v:.0f}"
-
-
-class _SkillRow(QtWidgets.QWidget):
-    """name + subtle fill bar + value + crit% (gold)."""
-    def __init__(self):
-        super().__init__()
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(0, 1, 0, 1)
-        lay.setSpacing(8)
-        self.name = QtWidgets.QLabel()
-        self.name.setMinimumWidth(92)
-        self.name.setStyleSheet(f"color:{theme.TEXT};background:transparent;")
-        self.bar = Bar(theme.ACCENT)
-        self.bar.setMinimumHeight(10)
-        self.val = QtWidgets.QLabel()
-        self.val.setObjectName("Mono")
-        self.val.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.val.setMinimumWidth(54)
-        self.val.setStyleSheet(f"color:{theme.TEXT};background:transparent;")
-        self.crit = QtWidgets.QLabel()
-        self.crit.setObjectName("Mono")
-        self.crit.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.crit.setMinimumWidth(40)
-        self.crit.setStyleSheet(f"color:{theme.GOLD};background:transparent;")
-        lay.addWidget(self.name)
-        lay.addWidget(self.bar, 1)
-        lay.addWidget(self.val)
-        lay.addWidget(self.crit)
-
-    def set(self, name, frac, value, crit=""):
-        self.name.setText(name)
-        self.bar.set(frac)
-        self.val.setText(value)
-        self.crit.setText(crit)
 
 
 class _HistRow(QtWidgets.QWidget):
@@ -92,6 +55,56 @@ class _HistRow(QtWidgets.QWidget):
         self._labels["k"].setText(k)
 
 
+class _Survival(QtWidgets.QWidget):
+    """Incoming-damage / survivability strip: own-HP bar, DTPS / taken / deaths,
+    and a death-recap line of the last few hits taken."""
+    def __init__(self):
+        super().__init__()
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        self.header = SectionHeader("SURVIVABILITY", color=theme.DANGER)
+        v.addWidget(self.header)
+        hp_row = QtWidgets.QHBoxLayout()
+        hp_row.setSpacing(8)
+        lab = QtWidgets.QLabel("HP")
+        lab.setObjectName("Mono")
+        lab.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
+        self.hp_bar = Bar(theme.GOOD)
+        self.hp_bar.setMinimumHeight(10)
+        hp_row.addWidget(lab)
+        hp_row.addWidget(self.hp_bar, 1)
+        v.addLayout(hp_row)
+        self.stat = QtWidgets.QLabel("")
+        self.stat.setObjectName("Mono")
+        self.stat.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
+        v.addWidget(self.stat)
+        self.recap = QtWidgets.QLabel("")
+        self.recap.setObjectName("Mono")
+        self.recap.setWordWrap(True)
+        self.recap.setStyleSheet(f"color:{theme.DIM};background:transparent;")
+        v.addWidget(self.recap)
+
+    def update_from(self, m, hp_frac, now):
+        dtps = m.dtps(now)
+        deaths = getattr(m, "_deaths_view", 0)
+        self.stat.setText(f"DTPS {dtps:,.0f}   TAKEN {m.taken_total / 1000:,.1f}K"
+                          f"   DEATHS {deaths}")
+        if hp_frac is not None:
+            self.hp_bar.set(hp_frac)
+            col = theme.GOOD if hp_frac > 0.5 else (theme.GOLD if hp_frac > 0.2 else theme.DANGER)
+            self.hp_bar.set_color(col)
+        recap = list(m.recent_incoming)[-4:]
+        if recap:
+            parts = [f"{names.skill_name(ev.skill) or ev.skill} {ev.amount:,.0f}" for ev in recap]
+            self.recap.setText("RECAP: " + " · ".join(parts))
+        else:
+            self.recap.setText("")
+
+    def has_data(self, m) -> bool:
+        return bool(m.taken_total > 0 or m.recent_incoming)
+
+
 class DpsOverlay(OverlayWindow):
     def __init__(self, model, settings, parent=None):
         super().__init__("DPS", settings, geo_key="dps", parent=parent)
@@ -99,19 +112,25 @@ class DpsOverlay(OverlayWindow):
         self.s = settings
         self.radius = settings.dps_radius
         self._hist: deque[float] = deque([0.0] * HIST, maxlen=HIST)
+        self._last_encounter = None
+        self._best_flash_until = 0.0
 
-        # range control + reset in the title bar
+        # title bar: range −/+, reset, export
         self._range_lbl = QtWidgets.QLabel()
         self._range_lbl.setObjectName("Mono")
         minus = QtWidgets.QPushButton("−"); minus.setObjectName("Icon")
         plus = QtWidgets.QPushButton("+"); plus.setObjectName("Icon")
+        exp = QtWidgets.QPushButton(); exp.setObjectName("Icon")
+        exp.setIcon(icons.ui_qicon("download", theme.MUTED, 14))
+        exp.setToolTip("Export last encounter (CSV / JSON)")
         rst = QtWidgets.QPushButton(); rst.setObjectName("Icon")
         rst.setIcon(icons.ui_qicon("refresh-cw", theme.MUTED, 14))
         rst.setToolTip("Reset session")
         minus.clicked.connect(lambda: self._bump(-5))
         plus.clicked.connect(lambda: self._bump(5))
-        rst.clicked.connect(self.model.dps.reset)
-        for w in (rst, minus, self._range_lbl, plus):
+        exp.clicked.connect(self._export)
+        rst.clicked.connect(self._reset)
+        for w in (rst, exp, minus, self._range_lbl, plus):
             self.titlebar.extra.insertWidget(self.titlebar.extra.count() - 1, w)
         self._update_range()
 
@@ -128,13 +147,17 @@ class DpsOverlay(OverlayWindow):
         self.chart = Sparkline(theme.ACCENT)
         self.content.addWidget(self.chart)
 
-        self._bars_header = SectionHeader("BY SKILL ANALYSIS")
-        self.content.addWidget(self._bars_header)
-        self._rows = []
-        for _ in range(N_BARS):
-            r = _SkillRow()
+        # by-enemy-type breakdown (HP-diff) — which enemies your damage is going into
+        self._tgt_header = SectionHeader("BY ENEMY")
+        self.content.addWidget(self._tgt_header)
+        self._tgt_rows = [SkillRow() for _ in range(N_ENEMY)]
+        for r in self._tgt_rows:
+            r.apply_columns([])
             self.content.addWidget(r)
-            self._rows.append(r)
+
+        # survivability strip (incoming / HP / death recap)
+        self._survival = _Survival()
+        self.content.addWidget(self._survival)
 
         # recent-cycle history (encounters between idle gaps)
         self._cycles: deque[dict] = deque(maxlen=N_CYCLES)
@@ -149,40 +172,42 @@ class DpsOverlay(OverlayWindow):
         for r in self._hist_rows:
             self.content.addWidget(r)
 
-        self.content.addStretch(1)   # absorb slack here, not in the title bar
+        self.content.addStretch(1)
 
-        self.setMinimumWidth(round(240 * self.s.dps_scale))
-        self.apply_dps_mode(self.s.dps_mode)      # sets base size + section visibility
-        self._retint(self._accent)                # colour bars/chart/headers to accent
+        self._grip = QtWidgets.QSizeGrip(self)
+        self._grip.setFixedSize(16, 16)
+        self._grip.setToolTip("Drag to resize")
+
+        self.setMinimumWidth(round(220 * self.s.dps_scale))
+        self.apply_dps_mode(self.s.dps_mode)
+        self._retint(self._accent)
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_MS)
 
-    # --- size modes: small (number only) / medium (+graph +entities) / default --
-    _MODE_SIZE = {"small": (260, 132), "medium": (300, 340), "default": (300, 520)}
+    # --- size modes: small (number) / medium (+graph) / default (+survival+cycles) --
+    _MODE_SIZE = {"small": (240, 120), "medium": (300, 230), "default": (320, 430)}
 
     def apply_dps_mode(self, mode: str) -> None:
         mode = mode if mode in self._MODE_SIZE else "default"
         self._mode = mode
-        med = mode in ("medium", "default")    # graph + per-entity bars
-        full = mode == "default"               # + recent-cycle history
+        med = mode in ("medium", "default")    # + sparkline
+        full = mode == "default"               # + survivability + recent cycles
         self.sub.setVisible(med)
         self.chart.setVisible(med)
-        self._bars_header.setVisible(med)
-        for r in self._rows:
-            r.setVisible(med)
+        self._survival.setVisible(full)
+        for w in (self._tgt_header, *self._tgt_rows):
+            w.setVisible(med)               # by-enemy shows from medium up
         for w in (self._hist_header, self._hist_head_row, *self._hist_rows):
             w.setVisible(full)
         self._base_w, self._base_h = self._MODE_SIZE[mode]
-        self.apply_scale(self._scale)          # resize to base*scale
+        self.apply_scale(self._scale)
 
     def _retint(self, accent: str) -> None:
         if not accent:
             return
         self.chart.set_color(accent)
-        for r in self._rows:
-            r.bar.set_color(accent)
-        self._bars_header.set_color(accent)
+        self._tgt_header.set_color(accent)
         self._hist_header.set_color(accent)
 
     def _bump(self, d):
@@ -192,37 +217,91 @@ class DpsOverlay(OverlayWindow):
     def _update_range(self):
         self._range_lbl.setText("∞" if self.radius == 0 else str(self.radius))
 
+    def _reset(self):
+        reset = getattr(self.model, "reset_combat", None)
+        (reset or self.model.dps.reset)()
+        self._cycles.clear()
+        self._cyc = None
+        self._prev_total = 0.0
+        self._last_encounter = None
+
     def _tick(self):
         try:
             m = self.model.sample_combat(radius=float(self.radius))
         except Exception as e:
             self.sub.setText(f"err: {e}")
             return
+        m._deaths_view = getattr(self.model, "deaths", 0)
         dps = m.current_dps()
         self._hist.append(dps)
         self.chart.set_color(self.s.hud_accent)
         self.big.setText(f"{dps:,.0f}")
-        if m.total > 0:
-            extra = f"   K {m.kills}" if m.kills else ""
-            self.sub.setText(
-                f"PEAK {m.peak:,.0f}   TOTAL {m.total / 1000:,.1f}K / {m.duration:.0f}S{extra}")
-        else:
-            self.sub.setText("idle — no damage in range")
+        now = time.monotonic()
+        self._set_sub(m, now)
         self.chart.set_data(list(self._hist))
         if self._mode in ("medium", "default"):
-            self._draw_bars(m)
-        self._update_cycles(m, time.monotonic(), dps)   # keep tracking even if hidden
+            self._draw_targets(m, self.s.hud_accent)
+        if self._mode == "default":
+            self._draw_survival(m, now)
+        self._update_cycles(m, now, dps)
         if self._mode == "default":
             self._render_history()
 
+    def _set_sub(self, m, now):
+        if now < self._best_flash_until:
+            self.sub.setText("★ NEW PERSONAL BEST ★")
+            return
+        if m.total > 0:
+            extra = f"   K {m.kills}" if m.kills else ""
+            burst = m.burst(5.0)
+            bstr = f"   BURST {burst / 1000:,.1f}K/5s" if burst else ""
+            ttk = self._boss_ttk(m)
+            tstr = f"   TTK {ttk:.1f}s" if ttk is not None else ""
+            self.sub.setText(
+                f"PEAK {m.peak:,.0f}   TOTAL {m.total / 1000:,.1f}K / {m.duration:.0f}S"
+                f"{extra}{bstr}{tstr}")
+        else:
+            self.sub.setText("idle — no damage in range")
+
+    def _boss_ttk(self, m):
+        try:
+            _bid, present, hp = self.model.boss_state()
+        except Exception:
+            return None
+        if not present or not hp:
+            return None
+        return m.time_to_kill(hp)
+
+    def _draw_targets(self, m, accent):
+        """By-enemy-type breakdown (HP-diff). Which enemies your damage went into."""
+        top = m.top_targets(len(self._tgt_rows))
+        self._tgt_header.setVisible(bool(top))
+        mx = top[0][1] if top else 1.0
+        for i, r in enumerate(self._tgt_rows):
+            if i < len(top):
+                uid, dmg = top[i]
+                r.set_row(names.any_name(uid) or uid, dmg / mx if mx else 0, {},
+                          bar_label=_abbr(dmg), sheet="unit", id_=uid, accent=accent)
+                r.show()
+            else:
+                r.hide()
+
+    def _draw_survival(self, m, now):
+        hp = self.model.player_hp_frac()
+        # show the strip when we have own-HP (fast, always available) OR incoming
+        # data (DTPS/recap, only with the per-skill source).
+        if hp is None and not self._survival.has_data(m):
+            self._survival.setVisible(False)
+            return
+        self._survival.setVisible(self.s.dps_survival)
+        self._survival.update_from(m, hp, now)
+
     def _update_cycles(self, m, now, dps):
-        """Track encounters non-destructively off the running total: a cycle
-        starts on first damage and ends after IDLE_GAP with no new damage."""
         total = m.total
-        if total < self._prev_total - 1e-6:          # session was reset
+        if total < self._prev_total - 1e-6:
             self._cyc = None
             self._prev_total = total
-        elif total > self._prev_total + 1e-6:         # damage this tick
+        elif total > self._prev_total + 1e-6:
             self._last_dmg_t = now
             if self._cyc is None:
                 self._cyc = {"t0": now, "tot0": self._prev_total,
@@ -230,14 +309,26 @@ class DpsOverlay(OverlayWindow):
             self._prev_total = total
         if self._cyc is not None:
             self._cyc["peak"] = max(self._cyc["peak"], dps)
-            if now - self._last_dmg_t > IDLE_GAP:     # encounter ended
+            if now - self._last_dmg_t > IDLE_GAP:
                 dur = max(0.1, self._last_dmg_t - self._cyc["t0"])
                 tot = m.total - self._cyc["tot0"]
                 if tot > 0:
                     self._cycles.appendleft({
                         "dps": tot / dur, "peak": self._cyc["peak"],
                         "tot": tot, "dur": dur, "k": m.kills - self._cyc["k0"]})
+                    self._capture_encounter(m, now)
                 self._cyc = None
+
+    def _capture_encounter(self, m, now):
+        boss = self.model.dungeon_boss or ""
+        deaths = getattr(self.model, "deaths", 0)
+        enc = enc_mod.snapshot(m, boss=boss, deaths=deaths, ended_at=now)
+        self._last_encounter = enc
+        if boss and enc_mod.update_best(self.s.dps_best, enc):
+            self._best_flash_until = now + 4.0
+            self.s.save()
+        elif boss:
+            self.s.save()
 
     def _render_history(self):
         for i, r in enumerate(self._hist_rows):
@@ -250,32 +341,34 @@ class DpsOverlay(OverlayWindow):
                 r.hide()
         self._hist_header.set_tag("" if self._cycles else "NONE YET")
 
-    def _draw_bars(self, m):
-        if m.has_events:
-            self._bars_header.set_text("BY SKILL ANALYSIS")
-            top = m.top_skills(N_BARS)
-            mx = top[0][1].total if top else 1.0
-            for i, r in enumerate(self._rows):
-                if i < len(top):
-                    skill, st = top[i]
-                    crit = f"{100 * st.crits / st.hits:.0f}%" if st.hits else ""
-                    r.set(names.any_name(skill) or skill,
-                          st.total / mx if mx else 0, f"{st.total:,.0f}", crit)
-                    r.show()
-                else:
-                    r.hide()
-        else:
-            self._bars_header.set_text("BY TARGET (HP-DIFF)")
-            top = m.top_targets(N_BARS)
-            mx = top[0][1] if top else 1.0
-            for i, r in enumerate(self._rows):
-                if i < len(top):
-                    uid, dmg = top[i]
-                    r.set(names.any_name(uid) or uid,
-                          dmg / mx if mx else 0, f"{dmg:,.0f}", "")
-                    r.show()
-                else:
-                    r.hide()
+    def _export(self):
+        enc = self._last_encounter
+        if enc is None:
+            m = self.model.dps
+            if m.total <= 0:
+                self.sub.setText("nothing to export yet")
+                return
+            enc = enc_mod.snapshot(m, boss=self.model.dungeon_boss or "",
+                                   deaths=getattr(self.model, "deaths", 0),
+                                   ended_at=time.monotonic())
+        label = (names.any_name(enc.boss) or enc.boss or "encounter").replace(" ", "_")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export encounter", f"{label}_dps.json",
+            "JSON (*.json);;CSV (*.csv)")
+        if not path:
+            return
+        try:
+            enc_mod.export(enc, path)
+            self.sub.setText(f"exported -> {path.rsplit('/', 1)[-1]}")
+        except OSError as e:
+            self.sub.setText(f"export failed: {e}")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        g = getattr(self, "_grip", None)
+        if g is not None:
+            g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
+            g.raise_()
 
     def closeEvent(self, e):
         self._timer.stop()

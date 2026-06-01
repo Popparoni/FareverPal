@@ -72,13 +72,13 @@ def scan(proc: Proc, pattern: str, *, executable: bool | None = None,
 def find_unique(proc: Proc, pattern: str, **kw) -> int:
     """Scan and insist on exactly one hit — the CT's 'should be unique'
     contract. Raises ProcError (with a count) otherwise, so we never patch an
-    ambiguous or missing target. If the CT is already hooked at the same site
-    the original bytes are gone, so this returns 0 and we safely abort."""
+    ambiguous or missing target. If another memory tool is already hooked at the
+    same site the original bytes are gone, so this returns 0 and we safely abort."""
     kw.setdefault("limit", 3)
     hits = scan(proc, pattern, **kw)
     if not hits:
         raise ProcError(
-            "AOB not found. The game was patched, OR Farever.CT is already "
+            "AOB not found. The game was patched, OR another tool is already "
             "hooked at this site — unload it and retry.")
     if len(hits) > 1:
         preview = ", ".join(f"{h:#x}" for h in hits[:4])

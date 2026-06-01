@@ -16,14 +16,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from . import theme
 from .overlay_base import OverlayWindow
-from ..core.speedrun import SpeedrunTimer, fmt_time
+from ..core.speedrun import SpeedrunTimer, AutoStarter, ModeLatch, fmt_time
 from ..data import names, icons
 from ..api import FareverAPI
 
 TICK_MS = 50           # centisecond-smooth display + boss poll while running
 DETECT_EVERY = 10      # run the (heavier) dungeon detection every Nth tick (~500ms)
-MOVE_THRESHOLD = 2.0   # world units of real movement (from the baseline) to auto-start
-TELEPORT_STEP = 50.0   # a single-tick jump bigger than this = scene change/teleport, not walking
+REARM_TICKS = 100      # ~5s after a finish, re-arm for the next run (back-to-back)
 
 
 class SpeedrunOverlay(OverlayWindow):
@@ -38,8 +37,9 @@ class SpeedrunOverlay(OverlayWindow):
         self._detect_ctr = 0
         self._dungeon_bid: str | None = None   # detected dungeon boss (sticky)
         self._in_dungeon = False                # boss currently present in the scene
-        self._move_base = None                  # baseline xyz once armed inside a dungeon
-        self._last_pos = None                   # previous tick xyz (to reject teleports)
+        self._starter = AutoStarter()           # settle-baseline auto-start decision (pure)
+        self._latch = ModeLatch()               # last good auto-detected difficulty this run
+        self._done_ctr = 0                      # ticks since a finish (for back-to-back re-arm)
         self._uploaded = False                  # guard: one upload per finished run
         self._run_mode: str | None = None       # difficulty captured at finish
         self._run_mode_src: str | None = None    # "auto" (read from boss level) | "manual"
@@ -120,8 +120,9 @@ class SpeedrunOverlay(OverlayWindow):
 
     def reset(self):
         self.timer.reset()
-        self._move_base = None
-        self._last_pos = None
+        self._starter.reset()
+        self._latch.reset()
+        self._done_ctr = 0
         self._uploaded = False
         self._run_mode = None
         self._run_mode_src = None
@@ -164,8 +165,12 @@ class SpeedrunOverlay(OverlayWindow):
                 self._dungeon_bid = bid
             self._in_dungeon = bool(present)
             self._update_dungeon_icon()
-            # Refresh the live difficulty readout (cheap: a single boss-level read).
+            # Refresh the live difficulty readout (cheap: a single boss-level read)
+            # and, while the boss is alive and fighting, latch a confident auto
+            # read so the finish-frame (boss dying) can't flip Normal<->Hard.
             self._live_mode, self._live_mode_src = self._resolve_mode()
+            if running:
+                self._latch.observe(self._live_mode, self._live_mode_src)
 
         # Auto-stop on boss kill, or CANCEL if the player left the dungeon (the
         # boss despawning at full HP — e.g. going to the main menu — is not a kill).
@@ -173,59 +178,50 @@ class SpeedrunOverlay(OverlayWindow):
             if t.feed_boss(*boss) == t.LEFT:
                 self._on_run_aborted()
 
-        # Auto-start: only INSIDE a dungeon, and only on real physical movement.
+        # Auto-start: only INSIDE a dungeon, and only on real physical movement
+        # from a settled spawn baseline (consistent — never on the teleport-in).
         if t.state == t.READY and self.model is not None:
             self._check_auto_start()
 
-        # Run just started → arm a fresh upload.
+        # Run just started → arm a fresh upload + a fresh difficulty latch.
         if t.state == t.RUNNING and self._prev_state != t.RUNNING:
             self._uploaded = False
+            self._latch.reset()
             self.upload_lbl.hide()
             self._upload_btn.hide()
 
-        # Run just finished → capture difficulty (boss still in scene), PB, upload.
-        # PB + auto-upload only count a CONFIRMED kill (a manual stop without a
-        # kill must never set a bogus PB or auto-submit).
+        # Run just finished → capture difficulty, PB, upload. Prefer the value
+        # latched while the boss was alive over a fresh read (the boss is dead
+        # now, so a fresh read often can't see it). PB + auto-upload only count a
+        # CONFIRMED kill (a manual stop must never set a bogus PB or auto-submit).
         if t.state == t.DONE and self._prev_state != t.DONE:
-            self._run_mode, self._run_mode_src = self._resolve_mode()
+            self._done_ctr = 0
+            self._run_mode, self._run_mode_src = self._latch.resolve(*self._resolve_mode())
             if t.is_kill:
                 self._record_best()
             self._maybe_upload()
 
+        # Back-to-back: after a finished run, re-arm for the next one without the
+        # user clicking reset — once they leave the dungeon, or after a short
+        # grace so the finished time is readable first. Toggleable.
+        if t.state == t.DONE and self.s.speedrun_auto_rearm:
+            self._done_ctr += 1
+            if (not self._in_dungeon) or self._done_ctr >= REARM_TICKS:
+                self.reset()
+
         self._prev_state = t.state
         self._render()
 
-    @staticmethod
-    def _dist(a, b) -> float:
-        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
-
     def _check_auto_start(self):
-        # Not in a dungeon → don't arm (and forget any stale baseline). This stops
-        # the timer from starting on town/overworld scene changes.
-        if not self._in_dungeon:
-            self._move_base = None
-            self._last_pos = None
-            return
+        # Delegate the (settle-baseline) decision to the pure AutoStarter so it
+        # behaves identically every run: it only fires on deliberate movement
+        # away from a stationary spawn baseline, never on the teleport-in jitter.
         try:
             pos = self.model.player_xyz()
         except Exception:
             pos = None
-        if not pos:
-            return
-        # A big single-tick jump is a scene load / teleport (e.g. arriving in the
-        # dungeon), NOT walking — re-baseline there and wait for real movement.
-        if self._last_pos is not None and self._dist(pos, self._last_pos) > TELEPORT_STEP:
-            self._move_base = pos
-            self._last_pos = pos
-            return
-        self._last_pos = pos
-        if self._move_base is None:
-            self._move_base = pos
-            return
-        if self._dist(pos, self._move_base) >= MOVE_THRESHOLD:
+        if self._starter.feed(self._in_dungeon, pos):
             self.timer.start()
-            self._move_base = None
-            self._last_pos = None
 
     def _update_dungeon_icon(self):
         bid = self._dungeon_bid
@@ -285,8 +281,9 @@ class SpeedrunOverlay(OverlayWindow):
         """Player left the dungeon / hit the main menu mid-run: cancel the run
         without recording a time or uploading anything."""
         self.timer.reset()
-        self._move_base = None
-        self._last_pos = None
+        self._starter.reset()
+        self._latch.reset()
+        self._done_ctr = 0
         self._uploaded = False
         self._run_mode = None
         self._run_mode_src = None
@@ -327,8 +324,12 @@ class SpeedrunOverlay(OverlayWindow):
         self.upload_lbl.show()
 
         co_runners = list(self.s.speedrun_corunners or [])
+        # Per-run build override (Speedrun tab): when on, attach this build code;
+        # otherwise the server links the player's profile featured build.
+        build_code = (self.s.speedrun_build_override or "").strip() if self.s.speedrun_build_override_on else ""
         def work():
-            res = FareverAPI(base, token).submit_run(slug, time_ms, mode=mode, co_runners=co_runners)
+            res = FareverAPI(base, token).submit_run(
+                slug, time_ms, mode=mode, co_runners=co_runners, build_code=build_code)
             if res.get("ok"):
                 msg = "uploaded · pending review" if res.get("flagged") else "uploaded · live ✓"
             else:

@@ -20,9 +20,9 @@ Two entry kinds, selected by the table's `flags` (CDB column
   top (see data/rarity.py) and the genuinely-rare cosmetic lives in the boss's
   separate (non-Weights) `lootTable`.
 
-This corrects the earlier port (Farever.CT entry 1337094962) which never
-normalized Weights tables — it matched the CT's internal predict step but not
-observed drops. See findings/drops.md §"How drops work".
+This corrects an earlier port of this table that never normalized Weights
+tables — it matched the original's internal predict step but not observed
+drops. See findings/drops.md §"How drops work".
 
 Pure data: needs no attached process.
 """

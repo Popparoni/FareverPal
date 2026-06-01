@@ -56,6 +56,11 @@ class FareverAPI:
     def me(self) -> dict:
         return self._request("GET", "/api/me.php", auth=True)
 
+    def latest_release(self) -> dict:
+        """Latest desktop-app release for the in-app updater (public, no auth).
+        -> {ok, version, url, asset, size, sha256, notes, html_url} | {ok:False}."""
+        return self._request("GET", "/api/release.php")
+
     def set_accent(self, hex_color: str) -> dict:
         return self._request("POST", "/api/profile.php", {"accent_color": hex_color}, auth=True)
 
@@ -64,10 +69,12 @@ class FareverAPI:
 
     def submit_run(self, category: str, time_ms: int, mode: str = "normal",
                    video_url: str = "", title: str = "", notes: str = "", server: str = "",
-                   co_runners: list | None = None) -> dict:
+                   co_runners: list | None = None, build_code: str = "") -> dict:
         """-> {ok, id, status, flagged, flag_reason}. `co_runners` = friend codes
-        (FRVR-XXXX-XXXX); the server links each co-runner's featured build."""
-        return self._request("POST", "/api/speedrun/submit.php", {
+        (FRVR-XXXX-XXXX); the server links each co-runner's featured build.
+        `build_code` overrides the build linked to *your* run; empty = the server
+        falls back to your profile's featured build."""
+        body = {
             "category": category,
             "time_ms": int(time_ms),
             "mode": mode,
@@ -76,7 +83,16 @@ class FareverAPI:
             "notes": notes,
             "server": server,
             "co_runners": list(co_runners or []),
-        }, auth=True)
+        }
+        if build_code:
+            body["build_code"] = build_code
+        return self._request("POST", "/api/speedrun/submit.php", body, auth=True)
+
+    def lookup_build(self, code: str) -> dict:
+        """Resolve a build code to its display chip (for the Speedrun-tab preview).
+        -> {ok, code, title, class, icon, mine} | {ok:False}. Requires auth."""
+        code = urllib.parse.quote(str(code).strip())
+        return self._request("GET", f"/api/build/lookup.php?code={code}", auth=True)
 
     def edit_run(self, run_id: int, **fields) -> dict:
         body = {"id": int(run_id)}

@@ -38,6 +38,52 @@ def backend_name() -> str:
     return "none"
 
 
+def find_pid(name: str = PROCESS_NAME) -> int | None:
+    """First PID whose image name == `name` (case-insensitive), or None.
+
+    Read-only: walks the Win32 Toolhelp process snapshot via ctypes and opens no
+    process handle, so it's cheap and safe to poll every couple of seconds. No
+    new dependency (the app is Windows-only). Returns None on any failure or if
+    the process isn't running.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:  # pragma: no cover - non-Windows / no ctypes
+        return None
+
+    TH32CS_SNAPPROCESS = 0x2
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    try:
+        k32 = ctypes.windll.kernel32
+    except Exception:  # pragma: no cover - non-Windows
+        return None
+    INVALID = ctypes.c_void_p(-1).value
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap in (0, None, -1, INVALID):
+        return None
+    try:
+        e = PROCESSENTRY32W()
+        e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = k32.Process32FirstW(snap, ctypes.byref(e))
+        target = name.lower()
+        while ok:
+            if e.szExeFile.lower() == target:
+                return int(e.th32ProcessID)
+            ok = k32.Process32NextW(snap, ctypes.byref(e))
+        return None
+    finally:
+        k32.CloseHandle(snap)
+
+
 class Proc:
     """Read-only handle to the game process."""
 
@@ -137,6 +183,20 @@ class Proc:
     def find_qword(self, value: int, rw_only: bool = True, max_hits: int = 4096) -> list[int]:
         """Aligned scan for an 8-byte value (pointer / type tag)."""
         return self.find_bytes(struct.pack("<Q", value), 8, rw_only, max_hits)
+
+    def find_bytes_in(self, needle: bytes, ranges: list[tuple[int, int]],
+                      align: int = 1, max_hits: int = 4096) -> list[int]:
+        """Scan ONLY `ranges` (each `(base, len)`) for `needle`. The fast path for
+        re-enumerating a clustered object type: the caller hands in the small set
+        of GC size-class page ranges instead of paying a full ~23 GB heap walk."""
+        if self.kind != "native":
+            raise ProcError("find_bytes_in needs the farever_native extension (memory scan)")
+        return list(self._impl.find_bytes_in(needle, ranges, align, max_hits))
+
+    def find_qword_in(self, value: int, ranges: list[tuple[int, int]],
+                      max_hits: int = 4096) -> list[int]:
+        """Aligned 8-byte scan for `value`, restricted to `ranges`."""
+        return self.find_bytes_in(struct.pack("<Q", value), ranges, 8, max_hits)
 
     def regions(self) -> list[tuple[int, int, int, bool]]:
         """Committed readable regions as (base, size, protect, writable). Native

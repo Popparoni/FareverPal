@@ -1,10 +1,15 @@
-"""Code-detour injector for the read-only-EFFECT player hook.
+"""Code-detour injector for the OPT-IN player/camera locate fast-path.
 
-This is the ONLY part of the companion that writes to the game, and it does so
-narrowly: it allocates a trampoline page inside the game, steals N bytes at one
-unique code site, and redirects them to the trampoline (which copies a register
-into our slot and jumps back). It touches no game data or save files; the patch
-is restored on `disable()`. Ported from the proven tools/farever_qa injector.
+This is the ONLY part of the companion that writes to the game, and it is OFF by
+default — it runs only when the user sets FAREVER_ENABLE_HOOK=1 (see
+config.hook_locate_enabled). The default locator (core/player.PlayerLocator) is
+a pure memory read and never reaches this module.
+
+When enabled it writes narrowly: it allocates a trampoline page inside the game,
+steals N bytes at one unique code site, and redirects them to the trampoline
+(which copies a register into our slot and jumps back). It touches no game data
+or save files; the patch is restored on `disable()`. Ported from the proven
+tools/farever_qa injector.
 
 It opens its OWN write handle by PID (PROCESS_VM_WRITE|OPERATION) so the main
 `Proc` (the Rust reader) stays strictly read-only.

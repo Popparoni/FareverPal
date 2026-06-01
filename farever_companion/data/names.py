@@ -25,6 +25,23 @@ def _units() -> dict[str, str]:
     return {r["id"]: (r.get("name") or r["id"]) for r in cdb.wiki("enemies")}
 
 
+@lru_cache(maxsize=1)
+def _skills() -> dict[str, str]:
+    return {r["id"]: (r.get("name") or r["id"]) for r in cdb.wiki("skills")}
+
+
+def skill_name(skill_id: str | None) -> str | None:
+    """Internal skill id (BaseSkill.kind, e.g. 'Priest_Prayer_Smite') -> the
+    game's readable name ('Prayer: Smite'), via htdocs/assets/data/skills.json.
+    Falls back to a humanized id ('Mace_Base_Attack' -> 'Mace Base Attack')."""
+    if not skill_id:
+        return skill_id
+    nm = _skills().get(skill_id)
+    if nm and nm != skill_id:
+        return nm
+    return humanize(skill_id) or skill_id
+
+
 def item_name(item_id: str | None) -> str | None:
     if not item_id:
         return item_id

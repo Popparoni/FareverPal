@@ -15,6 +15,7 @@ Bug fixes vs the old tool, enforced here:
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from .proc import Proc, ProcError
@@ -25,6 +26,7 @@ from . import attributes
 from ..combat.dps import DpsMeter
 from ..data import loot, units as udata, rarity as rarity_mod
 from ..geo import chests as chestdb
+from ..config import hook_locate_enabled
 
 XYZ = tuple[float, float, float]
 
@@ -58,9 +60,16 @@ class LiveModel:
         self.proc = proc
         self.hl = Hl(proc)
         self.scene = Scene(proc, self.hl)
-        # Fast read-only-effect code hook (the old tool / CT method). The pure-
-        # read scan PlayerLocator remains available as a no-write fallback.
-        self.locator = HookLocator(proc, self.hl)
+        # Player locate. DEFAULT = PlayerLocator: pure memory scan, zero writes
+        # to the game. An opt-in code-hook fast-path (HookLocator) exists for the
+        # rare case where the cold scan is too slow; it installs a self-restoring
+        # code detour, so it *writes* to the game and is gated behind
+        # FAREVER_ENABLE_HOOK (off by default). See config.hook_locate_enabled.
+        self._allow_hook = hook_locate_enabled()
+        self.locator = (HookLocator(proc, self.hl) if self._allow_hook
+                        else PlayerLocator(proc, self.hl))
+        # camera-yaw is also a code hook (minimap rotation); it only writes when
+        # enabled, and we only enable it on the hook path. Constructing it is inert.
         self.camera = CameraLocator(proc)     # free-look yaw (best-effort 2nd hook)
         try:
             self.chests = chestdb.load_chests()
@@ -71,19 +80,94 @@ class LiveModel:
         self._units_cache: list[Entity] = []
         self._units_at = 0.0
         self.dungeon_boss: str | None = None
-        self.dps = DpsMeter()
+        self.dps = DpsMeter()              # HP-diff (by-enemy) -> DPS meter panel
+        self.dps_events = DpsMeter()       # per-skill DamageDisplay events -> Skill panel
         self._combat_at = 0.0
+        import threading as _th
+        self._redrive = _th.Event()        # combat-triggered cluster re-derive request
         self._damage = None        # lazily created DamageReader (Phase 6)
+        self._damage_scan_started = False   # the type-locate runs once, off-thread
+        self._damage_scan_t0 = 0.0          # when calibration started (for progress UI)
+        self._combat_q: deque = deque(maxlen=20000)   # bg poller -> UI drain
+        self._poller_started = False
+        self._stop = False         # signals background threads to exit
+        # Per-skill (DamageDisplay) is OPT-IN (config `dps_per_skill`, default OFF
+        # until validated live). The old "can't be live" blocker is solved by the
+        # cluster scan: HashLink's GC is non-moving + size-class segregated, so the
+        # transient display objects cluster in a few GC pages we can re-scan in
+        # sub-100ms each tick (see DPS_METER_PLAN). HP-diff stays the fallback.
+        # Per-skill is gated behind the experimental flag (release builds hide it —
+        # incomplete coverage + slow calibration; see config.experimental_enabled).
+        # Even if dps_per_skill is True in settings, it stays off without the flag.
+        try:
+            from ..config import Settings, experimental_enabled
+            self.per_skill_enabled = bool(experimental_enabled()
+                                          and Settings.load().dps_per_skill)
+        except Exception:
+            self.per_skill_enabled = False
+        # survivability: own-HP ring buffer + death edge detection
+        self.player_hp_log: deque[tuple[float, float]] = deque(maxlen=240)
+        self.player_max_hp: float = 0.0
+        self.deaths: int = 0
+        self._was_alive: bool = False
 
     # --- lifecycle -------------------------------------------------------
     def locate_player(self) -> int | None:
         addr = self.locator.locate()
         if addr:
             try:
-                self.camera.enable()      # best-effort; minimap falls back if absent
+                if self._allow_hook:
+                    self.camera.enable()  # best-effort; minimap falls back if absent
+            except Exception:
+                pass
+            # kick off the (slow, ~1 min) DamageDisplay type-locate now, in the
+            # background, so per-skill DPS is ready by the time the meter is used.
+            try:
+                self._damage_source()
             except Exception:
                 pass
         return addr
+
+    def per_skill_status(self) -> str:
+        """'active' | 'scanning' | 'off' — drives the meter's 'calibrating' hint.
+        'off' = uncalibrated or no scan backend; 'scanning' = the type-locate /
+        cluster mapping is running; 'active' = the cluster ranges are ready."""
+        from .damage import DamageReader
+        if not DamageReader.calibrated() or not self.proc.has_scan:
+            return "off"
+        if self._damage is not None and getattr(self._damage, "_ranges_ready", False):
+            return "active"
+        return "scanning" if self._damage_scan_started else "off"
+
+    def per_skill_progress(self) -> tuple[str, float]:
+        """Calibration progress for the Skills panel: (phase_label, fraction 0..1).
+        Returns ('', 1.0) once ready and ('', 0.0) when per-skill is off. The
+        fractions are elapsed-time estimates (the Rust scans give no real %), so
+        the bar advances steadily and caps just shy of full until each phase ends.
+        Phase 1 = locate the DamageDisplay type (~full-heap name scan, the slow
+        one); phase 2 = map the GC cluster ranges (a heap sweep for instances)."""
+        from .damage import DamageReader
+        if (not self.per_skill_enabled or not DamageReader.calibrated()
+                or not self.proc.has_scan):
+            return ("", 0.0)
+        d = self._damage
+        if d is None or not self._damage_scan_started:
+            return ("starting…", 0.02)
+        if getattr(d, "_ranges_ready", False):
+            return ("", 1.0)
+        el = time.monotonic() - (self._damage_scan_t0 or time.monotonic())
+        if d._type_ptr is None:
+            return (f"locating damage type · {el:.0f}s", min(0.60, 0.05 + el / 150.0))
+        return (f"mapping — keep attacking · {el:.0f}s", min(0.96, 0.62 + el / 100.0))
+
+    def recalibrate_skills(self) -> None:
+        """User-triggered: re-map the per-skill cluster NOW (attack while it runs).
+        Wakes the maintenance thread to re-derive the GC ranges against the live
+        DamageDisplay instances on screen — so a cluster that mapped during a lull
+        (no numbers) is fixed without waiting for the auto self-heal. No-op until
+        per-skill is enabled + the type is located."""
+        self._start_damage_type_scan()      # ensure the maintenance thread exists
+        self._redrive.set()
 
     def camera_yaw(self) -> float | None:
         """Free-look camera yaw in radians (-pi..pi), or None if the camera hook
@@ -95,6 +179,7 @@ class LiveModel:
 
     def shutdown(self) -> None:
         """Restore both hooks (if installed). Call before closing proc."""
+        self._stop = True          # let the background poller / scan threads exit
         for h in (self.locator, self.camera):
             disable = getattr(h, "disable", None)
             if callable(disable):
@@ -325,41 +410,201 @@ class LiveModel:
 
     # --- combat ----------------------------------------------------------
     def _damage_source(self):
-        """The DamageDisplay event reader, once it's calibrated (Phase 6).
-        Returns None until then so we use the HP-diff fallback."""
+        """The per-skill DamageDisplay reader — OPT-IN only (`per_skill_enabled`).
+        The display objects are transient (~1s) with no shared parent container, so
+        we can't read one container's children. Instead we exploit HashLink's
+        non-moving, size-class-segregated GC: every live DamageDisplay clusters in
+        the same handful of GC pages, so one slow full scan locates the cluster and
+        every tick re-scans ONLY those ranges (sub-100ms) — fast enough to catch a
+        number mid-life. Default OFF until validated live. Returns the reader once
+        its cluster ranges are derived (else None -> HP-diff in the meantime)."""
+        if not self.per_skill_enabled:
+            return None
         from .damage import DamageReader
         if not DamageReader.calibrated() or not self.proc.has_scan:
             return None
         if self._damage is None:
-            self._damage = DamageReader(self.proc, self.hl, self.player_addr)
-        return self._damage
+            # dedicated Hl so the background poller's reflection caches don't race
+            # with the UI thread's self.hl.
+            self._damage = DamageReader(self.proc, Hl(self.proc), self.player_addr)
+        self._damage.my_hero = self.player_addr     # for incoming-damage tagging
+        self._start_damage_type_scan()
+        return self._damage if getattr(self._damage, "_ranges_ready", False) else None
+
+    def _start_damage_type_scan(self) -> None:
+        # ONE maintenance thread (the flag is never cleared): locate the type, then
+        # periodically re-derive the cluster ranges (a slow full heap sweep) so they
+        # track the GC as it grows new size-class pages. The fast per-tick range
+        # scans happen in the poller. Only runs while per-skill is enabled (exp).
+        if self._damage_scan_started:
+            return
+        self._damage_scan_started = True
+        self._damage_scan_t0 = time.monotonic()
+
+        def _maintain():
+            while not self._stop and self.per_skill_enabled:
+                n = 0
+                try:
+                    n = self._damage.refresh_ranges()  # full sweep; derives _scan_ranges
+                except Exception:
+                    pass
+                self._redrive.clear()
+                # Adaptive spacing. A derive during a LULL finds only the persistent
+                # ~handful of instances, so the cluster may miss size-class pages that
+                # only fill during combat -> re-derive soon. A healthy combat-time
+                # derive (many instances) anchors those pages -> relax to ~5 min. AND
+                # wake immediately if combat signals the cluster caught nothing
+                # (`_redrive`), so a lull-derived cluster self-heals the moment you fight.
+                interval = 45 if n < 16 else 300
+                waited = 0.0
+                while waited < interval:
+                    if self._stop or not self.per_skill_enabled:
+                        return
+                    if self._redrive.wait(timeout=1.0):
+                        break                  # combat asked for a fresh derive
+                    waited += 1.0
+        import threading
+        threading.Thread(target=_maintain, daemon=True, name="dmg-maintain").start()
+
+    def _ensure_combat_poller(self, src) -> None:
+        """Run `src.poll()` on a BACKGROUND thread, feeding events into a queue
+        the UI thread drains. poll() is now a RANGE-BOUNDED scan (only the GC
+        size-class pages the cluster occupies, ~tens of MB -> sub-100ms), not a
+        full-heap sweep — but it still lives off the UI thread so a slow read can
+        never stall a frame, and so it can poll fast enough to catch ~1s numbers."""
+        if self._poller_started:
+            return
+        self._poller_started = True
+
+        import sys
+
+        def _log(m):
+            print(f"[dmg-poller] {m}", file=sys.stderr, flush=True)
+
+        def _loop():
+            _log(f"started; type_ptr={getattr(src, '_type_ptr', None)}")
+            last_ev = 0.0
+            total = 0
+            polls = 0
+            last_report = time.monotonic()
+            while not self._stop:
+                t0 = time.monotonic()
+                try:
+                    evs = src.poll()
+                except (ProcError, OSError) as e:
+                    _log(f"poll read error: {e}")
+                    evs = []
+                except Exception as e:
+                    _log(f"poll EXC: {type(e).__name__}: {e}")
+                    evs = []
+                dt = time.monotonic() - t0
+                for ev in evs:
+                    self._combat_q.append(ev)
+                total += len(evs)
+                polls += 1
+                now2 = time.monotonic()
+                if now2 - last_report > 2.0:
+                    _log(f"polls={polls} last={len(evs)}ev/{dt:.1f}s total={total} q={len(self._combat_q)}")
+                    last_report = now2
+                # Poll FAST throughout a fight: a number lives ~1s, so 0.08s polling
+                # catches each one ~12x (never missed) as long as the cluster covers
+                # it. The OLD idle ramp-up to 2.5s was the stutter cause — it slept
+                # through the start of the next burst, dropping skills. poll() is
+                # cheap now (range-bounded), so stay tight while events flowed within
+                # the last 3s, and only back off after a real lull (saves CPU).
+                if evs:
+                    last_ev = now2
+                in_combat = (now2 - last_ev) < 3.0
+                time.sleep(0.08 if in_combat else 0.5)
+        import threading
+        threading.Thread(target=_loop, daemon=True, name="dmg-poller").start()
 
     def sample_combat(self, radius: float = 30.0) -> DpsMeter:
+        """Sample BOTH combat sources each tick (cached for 0.2s):
+          - HP-diff (by-enemy, team/area total) -> `self.dps`, the DPS-meter panel.
+            Always on, so the headline DPS + by-enemy breakdown + survivability never
+            depend on per-skill event capture (fixes 'idle' while in combat).
+          - per-skill DamageDisplay events -> `self.dps_events`, the Skill panel.
+            A SEPARATE meter so it never double-counts the HP-diff total.
+        Returns `self.dps` (the DPS-meter source); the Skill panel reads
+        `self.dps_events`."""
         now = time.monotonic()
-        if now - self._combat_at < 0.2:
+        if now - self._combat_at < 0.1:        # re-sample at up to ~10 Hz (smooth UI)
             return self.dps
         self._combat_at = now
 
-        # preferred: per-skill events from ui.comp.DamageDisplay (write-free)
-        src = self._damage_source()
-        if src is not None:
-            try:
-                for ev in src.poll():
-                    self.dps.add_event(ev)
-                return self.dps
-            except ProcError:
-                pass   # fall through to HP-diff on a transient read error
-
-        # fallback: HP-diff (team/area total). Bosses always tracked.
+        # (1) HP-diff -> DPS meter. Bosses tracked regardless of radius.
         xyz = self.player_xyz()
         snap = []
         for e in self.units():
             if not e.is_enemy:
                 continue
             boss = bool(e.unit_id and udata.is_boss(e.unit_id))
-            # FIX: bosses are tracked regardless of distance; others gated by radius
             if radius and xyz and not boss and e.dist(*xyz) > radius:
                 continue
             snap.append((e.addr, e.unit_id or "?", attributes.health(self.hl, e.addr)))
         self.dps.update(snap)
+        self._sample_player_hp(now)             # survivability (HP / taken) -> self.dps
+
+        # (2) per-skill events -> Skill panel meter (if the source is calibrated).
+        src = self._damage_source()
+        if src is not None:
+            self._ensure_combat_poller(src)
+            drained = 0
+            while self._combat_q and drained < 10000:
+                self.dps_events.add_event(self._combat_q.popleft())
+                drained += 1
+            # Self-heal: clearly in combat (HP-diff sees damage) yet the event source
+            # caught nothing -> the cluster was mapped during a lull and misses the
+            # live-number GC pages. Ask the maintenance thread to re-derive NOW; a
+            # combat-time derive anchors the right pages.
+            if self.dps.in_combat and not self.dps_events.in_combat:
+                self._redrive.set()
         return self.dps
+
+    # --- survivability ---------------------------------------------------
+    def _sample_player_hp(self, now: float) -> None:
+        """Sample own HP into the ring buffer + count death edges (alive->0).
+        Best-effort: silently no-ops if the player isn't located/readable."""
+        pa = self.player_addr
+        if not pa:
+            return
+        try:
+            hp = attributes.health(self.hl, pa)
+        except ProcError:
+            return
+        if hp is None:
+            return
+        self.player_max_hp = max(self.player_max_hp, hp)
+        # Damage TAKEN = our own HP dropping. This is the reliable source for
+        # DTPS / TAKEN / death recap (the survivability strip), so those numbers
+        # always move WITH the HP bar. Guard against rebaseline/respawn (a drop
+        # larger than max HP, or a heal/up-tick) so we never count phantom damage.
+        if self.player_hp_log:
+            prev = self.player_hp_log[-1][1]
+            drop = prev - hp
+            if 0 < drop < (self.player_max_hp or drop) * 1.5:
+                self.dps.add_taken(drop, now)
+        self.player_hp_log.append((now, hp))
+        if self._was_alive and hp <= 0:
+            self.deaths += 1
+        self._was_alive = hp > 0
+
+    def player_hp_series(self) -> list[float]:
+        return [hp for _t, hp in self.player_hp_log]
+
+    def player_hp_frac(self) -> float | None:
+        """Current HP / max-seen, or None if no sample yet."""
+        if not self.player_hp_log or self.player_max_hp <= 0:
+            return None
+        return max(0.0, min(1.0, self.player_hp_log[-1][1] / self.player_max_hp))
+
+    def reset_combat(self) -> None:
+        """Full combat reset: the meter plus the survivability buffers (so the
+        overlay's Reset button clears HP history + the death count too)."""
+        self.dps.reset()
+        self.dps_events.reset()
+        self.player_hp_log.clear()
+        self.player_max_hp = 0.0
+        self.deaths = 0
+        self._was_alive = False

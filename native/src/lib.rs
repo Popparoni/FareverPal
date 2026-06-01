@@ -366,6 +366,74 @@ impl Reader {
         }))
     }
 
+    /// Scan ONLY the given `ranges` (each `(base, len)`) for `needle`, returning
+    /// matching absolute addresses (capped at `max_hits`). Same matching rules as
+    /// `find_bytes` (`align`, exact byte compare), but it skips VirtualQuery and
+    /// the whole-heap walk — the caller supplies the (small) set of ranges to look
+    /// in (e.g. the GC size-class pages a class clusters into). This is the fast
+    /// path for re-enumerating a transient, short-lived object type every tick:
+    /// scanning tens of MB instead of ~23 GB. Unreadable chunks are skipped (a
+    /// range that straddles an unmapped gap won't fault the whole scan), so the
+    /// caller may pad ranges freely. Releases the GIL.
+    #[pyo3(signature = (needle, ranges, align=1, max_hits=4096))]
+    fn find_bytes_in(
+        &self,
+        py: Python<'_>,
+        needle: Vec<u8>,
+        ranges: Vec<(u64, u64)>,
+        align: usize,
+        max_hits: usize,
+    ) -> PyResult<Vec<u64>> {
+        if needle.is_empty() {
+            return Err(PyValueError::new_err("needle must be non-empty"));
+        }
+        let align = align.max(1);
+        Ok(py.allow_threads(|| {
+            let mut hits = Vec::new();
+            let nlen = needle.len();
+            let mut buf = vec![0u8; CHUNK + nlen];
+            'ranges: for (base, len) in ranges {
+                let base = base as usize;
+                let len = len as usize;
+                if len < nlen {
+                    continue;
+                }
+                let mut off = 0usize;
+                while off < len {
+                    // overlap each window by nlen-1 so a match on a chunk boundary
+                    // is not missed; clamp the final window to the range end.
+                    let want = (CHUNK + nlen - 1).min(len - off);
+                    let mut got = 0usize;
+                    let ok = unsafe {
+                        ReadProcessMemory(
+                            self.h(),
+                            (base + off) as *const c_void,
+                            buf.as_mut_ptr() as *mut c_void,
+                            want,
+                            &mut got,
+                        )
+                    };
+                    if ok != 0 && got >= nlen {
+                        let buf_addr = (base + off) as u64;
+                        let rem = (buf_addr % align as u64) as usize;
+                        let mut i = if rem == 0 { 0 } else { align - rem };
+                        while i + nlen <= got {
+                            if &buf[i..i + nlen] == needle.as_slice() {
+                                hits.push(buf_addr + i as u64);
+                                if hits.len() >= max_hits {
+                                    break 'ranges;
+                                }
+                            }
+                            i += align;
+                        }
+                    }
+                    off += CHUNK;
+                }
+            }
+            hits
+        }))
+    }
+
     // --- write side (RW attach only; unused by the read-only app) ---------
     fn write(&self, addr: u64, data: Vec<u8>) -> PyResult<()> {
         if !self.writable {

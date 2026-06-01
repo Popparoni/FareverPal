@@ -118,3 +118,106 @@ class SpeedrunTimer:
             self.stop(kill=True)
             return self.KILL
         return self.LEFT
+
+
+class AutoStarter:
+    """Decides when a run auto-starts: pure, headless, unit-testable.
+
+    Fed `(in_dungeon, pos)` once per overlay tick, it returns True exactly once —
+    on the tick the player makes *real* movement away from a settled spawn
+    baseline. Separated from the overlay (which only does I/O) so the start
+    behaviour can be tested without the game or Qt.
+
+    Why a settle gate: arriving in a dungeon teleports the player in, and the
+    position can jitter for a few ticks while the scene loads/the camera settles.
+    The old logic baselined the very first in-dungeon position, so that settling
+    jitter could exceed the move threshold and trip the timer "on enter" some
+    runs but not others (the inconsistency Hooch reported). We instead wait until
+    the player has been essentially stationary for a few consecutive ticks, then
+    baseline *that* resting spawn point — so only deliberate walking starts the
+    run, every time.
+    """
+
+    SETTLE_EPS = 0.6        # per-tick move under this == "standing still"
+    SETTLE_TICKS = 3        # consecutive still ticks before the baseline is trusted
+    MOVE_THRESHOLD = 2.0    # distance from the baseline that counts as "the run began"
+    TELEPORT_STEP = 50.0    # a single-tick jump bigger than this == load/teleport, not walking
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._base = None       # settled spawn position (baseline) once trusted
+        self._last = None       # previous tick position
+        self._settle = 0        # consecutive "standing still" ticks
+
+    @staticmethod
+    def _dist(a, b) -> float:
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+
+    def feed(self, in_dungeon: bool, pos) -> bool:
+        """Return True on the tick a real run-start movement is detected."""
+        # Outside a dungeon (or no position yet) → disarm; never start in town.
+        if not in_dungeon or not pos:
+            self.reset()
+            return False
+        if self._last is None:
+            self._last = pos
+            self._settle = 0
+            return False
+        step = self._dist(pos, self._last)
+        self._last = pos
+        # A big single-tick jump is a scene load / teleport-in, not walking:
+        # throw away any tentative baseline and wait for things to settle.
+        if step > self.TELEPORT_STEP:
+            self._base = None
+            self._settle = 0
+            return False
+        if self._base is None:
+            # Only trust a baseline once the player has held still for a few
+            # ticks — that's the real resting spawn point, free of load jitter.
+            if step < self.SETTLE_EPS:
+                self._settle += 1
+                if self._settle >= self.SETTLE_TICKS:
+                    self._base = pos
+            else:
+                self._settle = 0
+            return False
+        # Baseline established → deliberate movement away from it starts the run.
+        if self._dist(pos, self._base) >= self.MOVE_THRESHOLD:
+            self.reset()
+            return True
+        return False
+
+
+class ModeLatch:
+    """Latches the last confidently auto-detected difficulty *during* a run.
+
+    The Normal↔Hard mixups Hooch saw came from resolving difficulty at the
+    finish frame — the exact moment the boss dies/despawns, when its level is
+    flaky or unreadable, so it fell back to the manual selector (often the wrong
+    one). The boss's level is reliable while it's alive and fighting, so we
+    observe it every tick of the run and remember the last good *auto* read. At
+    finish we prefer that latched value over a fresh (possibly empty) read.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.mode: str | None = None
+        self.src: str | None = None
+
+    def observe(self, mode: str | None, src: str | None) -> None:
+        """Record a live reading; only confident auto reads are latched."""
+        if src == "auto" and mode in ("normal", "hard"):
+            self.mode, self.src = mode, "auto"
+
+    def resolve(self, fresh_mode: str | None, fresh_src: str | None) -> tuple[str | None, str | None]:
+        """Final (mode, src): a fresh auto read wins; else the latched auto read;
+        else the fresh fallback (manual selector / default)."""
+        if fresh_src == "auto":
+            return fresh_mode, fresh_src
+        if self.src == "auto":
+            return self.mode, "auto"
+        return fresh_mode, fresh_src

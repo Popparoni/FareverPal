@@ -155,10 +155,14 @@ class PlayerLocator:
 
 
 # ---------------------------------------------------------------------------
-#  HookLocator — fast read-only-EFFECT code hook (default; see core/inject.py)
+#  HookLocator — opt-in code-hook fast-path (WRITES to game; see core/inject.py)
 # ---------------------------------------------------------------------------
-# Same unique site the old tool + Farever.CT use: at this instruction r10 holds
-# the live player struct (the method's `this`). The trampoline copies r10 into
+# NOT the default. The default locator is PlayerLocator (pure read, zero writes);
+# this path installs a self-restoring code detour and only runs when the user
+# sets FAREVER_ENABLE_HOOK=1 (see config.hook_locate_enabled / core/model.py).
+#
+# At this instruction r10 holds the live player struct (the method's `this`),
+# so it's a stable site to read the current pointer. The trampoline copies r10 into
 # our slot every frame, so `pbase()` is always the *current* pointer — robust
 # across GC moves and zone changes, unlike a one-shot scanned address.
 #
@@ -251,7 +255,7 @@ class HookLocator:
                 return site, tramp        # adopt the leftover hook
         raise ProcError(
             "player AOB not found and no recoverable hook present — the game was "
-            "patched, or Farever.CT is hooked here (unload it and retry).")
+            "patched, or another tool is hooked here (unload it and retry).")
 
     def locate(self) -> int | None:
         """Install (or adopt) the hook and wait for it to capture the player."""

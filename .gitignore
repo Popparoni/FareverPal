@@ -41,5 +41,18 @@ desktop.ini
 
 # --- internal / scratch (never publish) ---
 _re_*.py
+_diag_*.py
+_reflect_dump.txt
+*_dump.txt
 notes/
 PLAN.md
+*_PLAN.md
+
+# --- AI assistant / internal docs (never publish) ---
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md

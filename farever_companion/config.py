@@ -11,6 +11,36 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 
 
+def experimental_enabled() -> bool:
+    """Dev/hidden gate for in-progress features kept OUT of release builds.
+
+    Currently gates the per-skill **Skill Breakdown**: it's read-only-honest but
+    incomplete (samples the scattered live DamageDisplay numbers — ~30% coverage
+    under heavy load) and slow to calibrate (~5 min cold type-locate), so it isn't
+    shipped to normal users. The exact features (headline DPS, by-enemy, the
+    survivability strip) are unaffected and always on. All the per-skill code stays
+    in-tree — set FAREVER_EXPERIMENTAL=1 to expose it (e.g. for dev / once the GC
+    page-walk makes it accurate + fast). See DPS_METER_PLAN.md.
+    """
+    return os.environ.get("FAREVER_EXPERIMENTAL", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def hook_locate_enabled() -> bool:
+    """Opt-in gate for the code-hook player/camera locate fast-path.
+
+    OFF by default. When off, the tool is strictly read-only: it locates the
+    player purely by scanning memory (PlayerLocator) and never writes to the
+    game. Setting FAREVER_ENABLE_HOOK=1 switches the player locate to the
+    HookLocator (and enables the camera-yaw hook), which installs a small,
+    self-restoring code detour in the running process. That detour *writes* to
+    the game's code in memory — faster locate, but no longer write-free — so it
+    must be an explicit, informed opt-in, never the shipped default.
+    """
+    return os.environ.get("FAREVER_ENABLE_HOOK", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
 def config_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
     d = Path(base) / "FareverCompanion"
@@ -37,6 +67,8 @@ class Settings:
     ui_scale: float = 1.0
     click_through: bool = False
     lock_overlays: bool = False      # lock HUD position + make click-through (mouse passes to game)
+    auto_attach: bool = True         # watch for Farever.exe → attach/locate/detach with zero clicks
+    auto_check_updates: bool = True  # check GitHub Releases (via the website) for a newer exe on startup
     entity_scale: float = 1.0        # per-overlay UI zoom
     dps_scale: float = 1.0
     hud_accent: str = "#38bdf8"      # overlay accent/highlight color (per HUD tab)
@@ -51,6 +83,20 @@ class Settings:
     # dps overlay size mode: small (just the DPS number), medium (number + graph
     # + per-entity bars), default (everything incl. recent-cycle history).
     dps_mode: str = "default"
+    # per-skill table columns shown (order fixed; subset of TABLE_COLUMNS in
+    # ui/skill_table.py), used by the Skill Breakdown panel. Toggle in Combat page.
+    dps_columns: list = field(default_factory=lambda: ["pct", "dps", "hits", "crit", "max"])
+    # show the survivability strip (incoming DTPS + HP + death recap) when data exists
+    dps_survival: bool = True
+    # show the full cumulative SKILL TOTALS breakdown (icons + dmg per skill) below
+    # recent cycles, in Full mode
+    dps_skill_totals: bool = True
+    # personal-best parse per boss unit_id -> {"dps": float, "hps": float}
+    dps_best: dict = field(default_factory=dict)
+    # live per-skill breakdown via the DamageDisplay cluster scan (see
+    # DPS_METER_PLAN). Default OFF until validated live; flip on once `_re_cluster.py`
+    # confirms fast scans + correct numbers. HP-diff stays the fallback regardless.
+    dps_per_skill: bool = False
     # minimap
     minimap_zoom: float = 14.0
     minimap_size: int = 320
@@ -99,6 +145,16 @@ class Settings:
     # be read (offset uncalibrated). Defaults to hard — the difficulty most
     # speedruns are run on.
     speedrun_mode: str = "hard"
+    # After a finished run, auto re-arm for the next one (back-to-back) without
+    # the user clicking reset — re-arms once they leave the dungeon or after a
+    # short grace. Off = the finished time stays until manually reset.
+    speedrun_auto_rearm: bool = True
+    # Per-run build override. When OFF (default) an uploaded run links the build
+    # set on the player's farever-pals.com profile (its featured build). When ON,
+    # `speedrun_build_override` (a build code) is attached to uploads instead, so
+    # you can log different builds per run from the Speedrun tab.
+    speedrun_build_override_on: bool = False
+    speedrun_build_override: str = ""            # build code (e.g. ABCD1234), "" = none
     # --- web account (Farever Pal site link) ---
     api_base: str = "https://farever-pals.com"   # web platform base URL
     account_name: str = ""                       # logged-in username ("" = not signed in)

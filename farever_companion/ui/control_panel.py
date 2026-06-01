@@ -19,12 +19,15 @@ from . import components as C
 from .widgets import fmt_pct
 from .entity_overlay import EntityOverlay
 from .dps_overlay import DpsOverlay
+from .skill_overlay import SkillOverlay
 from .minimap import MinimapOverlay
 from .speedrun_overlay import SpeedrunOverlay
 from .crosshair import CrosshairOverlay, CrosshairCanvas
 from ..config import Settings
-from ..core.proc import Proc, ProcError, backend_name
+from ..core.proc import Proc, ProcError, backend_name, find_pid
 from ..core.model import LiveModel
+from ..core.autoattach import AutoAttach, Act
+from ..core import updater
 from ..data import loot, names, tokens
 from ..data import icons
 from .. import __version__
@@ -46,7 +49,7 @@ NAV = [
 CLASSES = ["Auto", "Warrior", "Rogue", "Mage", "Priest", "Off"]
 # the game HUD overlays that share the global opacity + lock (crosshair has its
 # own opacity/click-through). Keep this in one place so new overlays inherit both.
-HUD_OVERLAYS = ("entity", "dps", "map", "speedrun")
+HUD_OVERLAYS = ("entity", "dps", "skills", "map", "speedrun")
 
 
 class _LocateWorker(QtCore.QThread):
@@ -134,6 +137,60 @@ class _FriendsWorker(QtCore.QThread):
         api.presence_ping(self.share)          # mark us "online (companion)"
         res = api.friends_list()
         self.done.emit(res if isinstance(res, dict) else {"ok": False})
+
+
+class _ApiWorker(QtCore.QThread):
+    """Off-thread one-shot API call. `fn(api) -> dict`; emits the result dict
+    (or {'ok': False} on failure). A `tag` rides along so one slot can route
+    several callers."""
+    done = QtCore.Signal(str, dict)
+
+    def __init__(self, base_url: str, token: str, fn, tag: str = ""):
+        super().__init__()
+        self.base_url, self.token, self.fn, self.tag = base_url, token, fn, tag
+
+    def run(self):
+        try:
+            res = self.fn(FareverAPI(self.base_url, self.token))
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        self.done.emit(self.tag, res if isinstance(res, dict) else {"ok": False})
+
+
+class _UpdateCheckWorker(QtCore.QThread):
+    """Off-thread: ask the web oracle for the latest release. Emits an
+    updater.UpdateInfo if a newer version exists, else None."""
+    done = QtCore.Signal(object)
+
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+
+    def run(self):
+        try:
+            self.done.emit(updater.check(FareverAPI(self.base_url)))
+        except Exception:
+            self.done.emit(None)
+
+
+class _UpdateDownloadWorker(QtCore.QThread):
+    """Off-thread: download + stage the new exe. Emits progress(0..100) and
+    finally done(Path | Exception)."""
+    progress = QtCore.Signal(int)
+    done = QtCore.Signal(object)
+
+    def __init__(self, info):
+        super().__init__()
+        self.info = info
+
+    def run(self):
+        def cb(d, t):
+            if t:
+                self.progress.emit(int(d * 100 / t))
+        try:
+            self.done.emit(updater.download_and_stage(self.info, cb))
+        except Exception as e:
+            self.done.emit(e)
 
 
 class LoginDialog(QtWidgets.QDialog):
@@ -338,9 +395,34 @@ class ControlPanel(QtWidgets.QMainWindow):
         self._friends_timer.timeout.connect(self._friends_poll)
         self._refresh_friends_gating()
 
+        # Auto-attach watcher: a cheap 2 s poll that attaches when Farever opens,
+        # keeps trying to locate the player until they're in-world, and detaches
+        # when the game closes — all via the existing manual paths (read-only).
+        self._auto = AutoAttach()
+        self._attach_busy = False
+        self._located_shown = False        # has the UI applied the 'located' transition?
+        self._attach_cooldown = 0          # ticks to skip after an auto-attach failure
+        self._attach_timer = QtCore.QTimer(self)
+        self._attach_timer.setInterval(2000)
+        self._attach_timer.timeout.connect(self._attach_tick)
+        self._attach_timer.start()
+        self._refresh_attach_status()
+
+        # Self-update: clear any leftover *.old from a prior update, then check
+        # GitHub Releases (via the website) for a newer exe — off the UI thread.
+        updater.cleanup_old()
+        self._update_info = None
+        self._update_check_worker: _UpdateCheckWorker | None = None
+        self._update_dl_worker: _UpdateDownloadWorker | None = None
+        self._updating = False
+        if self.s.auto_check_updates and self.s.api_base:
+            self._update_check_worker = _UpdateCheckWorker(self.s.api_base)
+            self._update_check_worker.done.connect(self._on_update_found)
+            self._update_check_worker.start()
+
         self.log(f"Read-only. Memory backend: {backend_name()}. Press Attach "
-                 "(unload Farever.CT first — it hooks the same site). The crosshair "
-                 "needs no attach.")
+                 "(if another memory tool is running, unload it first to avoid a "
+                 "hook conflict). The crosshair needs no attach.")
 
     def _brand_pixmap(self, size: int) -> QtGui.QPixmap:
         """The moustache brand mark for the header, tinted to the current accent on
@@ -395,6 +477,13 @@ class ControlPanel(QtWidgets.QMainWindow):
         ver.setObjectName("Mono")
         lay.addWidget(brand)
         lay.addWidget(ver)
+        # Update pill — hidden until the startup check finds a newer release.
+        self._update_btn = QtWidgets.QPushButton("")
+        self._update_btn.setObjectName("Accent")
+        self._update_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self._update_btn.setVisible(False)
+        self._update_btn.clicked.connect(self._on_update_clicked)
+        lay.addWidget(self._update_btn)
         lay.addSpacing(18)
 
         for key, icon, label in NAV:
@@ -455,8 +544,11 @@ class ControlPanel(QtWidgets.QMainWindow):
             btn.clicked.connect(self._open_login)
             self._acct_btn = btn
             self._acct_box.addWidget(btn)
-        # Sign in/out flips auto-upload availability — refresh its gating.
+        # Sign in/out flips auto-upload availability — refresh its gating + the
+        # profile-build readout on the Speedrun tab.
         self._refresh_speedrun_gating()
+        if hasattr(self, "_build_profile_lbl"):
+            self._refresh_profile_build()
         self._refresh_friends_gating()
 
     def _account_avatar_pixmap(self, size: int) -> QtGui.QPixmap:
@@ -594,25 +686,10 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.status.setObjectName("Mono")
         lay.addWidget(self.status)
         lay.addStretch(1)
-        # account button (sign in / avatar + name), left of the attach controls
+        # account button (sign in / avatar + name)
         lay.addWidget(self._build_account_host())
-        lay.addSpacing(10)
-        self.btn_attach = QtWidgets.QPushButton("ATTACH")
-        self.btn_attach.setObjectName("Accent")
-        self.btn_attach.clicked.connect(self.attach)
-        self.btn_detach = QtWidgets.QPushButton("DETACH")
-        self.btn_detach.setObjectName("Outline")
-        self.btn_detach.clicked.connect(self.detach)
-        bf = QtGui.QFont(theme.MONO_FONT, 10)
-        bf.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 1.5)
-        bf.setCapitalization(QtGui.QFont.AllUppercase)
-        bf.setBold(True)
-        for b in (self.btn_attach, self.btn_detach):
-            b.setCursor(QtCore.Qt.PointingHandCursor)
-            b.setMinimumHeight(32)
-            b.setFont(bf)            # font via QFont so #Accent/#Outline colors survive
-        lay.addWidget(self.btn_attach)
-        lay.addWidget(self.btn_detach)
+        # Attach/detach is fully automatic (watches for Farever) — no buttons or
+        # toggle; the status label above is the single source of truth for state.
         self._refresh_account_button()
         self._set_status(False, "detached")
         return bar
@@ -671,11 +748,17 @@ class ControlPanel(QtWidgets.QMainWindow):
         page, v = self._page_container()
         cards = QtWidgets.QGridLayout()
         cards.setSpacing(12)
+        from ..config import experimental_enabled
         specs = [
             ("entity", "layers", "Entity & Loot",
              "Nearby enemies, chests, and the closest drop table."),
             ("dps", "swords", "DPS Meter",
-             "Live self-DPS with a per-skill breakdown."),
+             "Big live self-DPS, survivability, recent cycles."),
+            # Skill Breakdown is experimental (incomplete + slow to calibrate) — kept
+            # out of release builds; FAREVER_EXPERIMENTAL=1 exposes it. See config.
+            *([("skills", "layers", "Skill Breakdown",
+                "Per-skill damage table — icons, real names, crit%. (experimental)")]
+              if experimental_enabled() else []),
             ("map", "map", "Minimap",
              "Top-down POI radar of chests, foes, and gatherables."),
             ("crosshair", "crosshair", "Crosshair",
@@ -830,9 +913,10 @@ class ControlPanel(QtWidgets.QMainWindow):
     def _set_dps_scale(self, v):
         sc = v / 100.0
         self._set("dps_scale", sc)
-        ov = self.overlays.get("dps")
-        if ov is not None and hasattr(ov, "apply_scale"):
-            ov.apply_scale(sc)
+        for key in ("dps", "skills"):      # the scale slider drives both DPS panels
+            ov = self.overlays.get(key)
+            if ov is not None and hasattr(ov, "apply_scale"):
+                ov.apply_scale(sc)
 
     def _set_dps_mode(self, label):
         mode = {"Small": "small", "Medium": "medium", "Full": "default"}.get(label, "default")
@@ -841,10 +925,19 @@ class ControlPanel(QtWidgets.QMainWindow):
         if ov is not None and hasattr(ov, "apply_dps_mode"):
             ov.apply_dps_mode(mode)
 
+    def _set_dps_columns(self):
+        from .skill_table import COLUMN_ORDER
+        keys = [k for k in COLUMN_ORDER
+                if self._dps_col_toggles[k].isChecked()]
+        self._set("dps_columns", keys)
+        ov = self.overlays.get("skills")
+        if ov is not None and hasattr(ov, "set_columns"):
+            ov.set_columns(keys)
+
     def _set_overlay_cards_enabled(self, on: bool):
-        """Overlay cards that need a live process (entity/dps/map) are gated
+        """Overlay cards that need a live process (entity/dps/skills/map) are gated
         until attach+locate succeeds. Crosshair stays available (cosmetic)."""
-        for key in ("entity", "dps", "map"):
+        for key in ("entity", "dps", "skills", "map"):
             for card in self._overlay_cards.get(key, []):
                 card.setEnabled(on)
 
@@ -852,10 +945,19 @@ class ControlPanel(QtWidgets.QMainWindow):
     def _page_combat(self):
         page, v = self._page_container()
         card = C.OverlayCard("swords", "Open DPS Meter",
-                             "Big live DPS, sparkline, and per-skill bars.")
+                             "Big live DPS, sparkline, survivability, recent cycles.")
         card.toggled.connect(lambda on: self._request_overlay("dps", on))
         self._register_card("dps", card)
         v.addWidget(card)
+
+        from ..config import experimental_enabled
+        if experimental_enabled():
+            skl = C.OverlayCard("layers", "Open Skill Breakdown",
+                                "Per-skill table — icons, real names, crit%, columns. "
+                                "(experimental — samples live numbers, can undercount)")
+            skl.toggled.connect(lambda on: self._request_overlay("skills", on))
+            self._register_card("skills", skl)
+            v.addWidget(skl)
 
         size_seg = C.SegmentedControl(
             ["Small", "Medium", "Full"],
@@ -863,8 +965,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         size_seg.currentChanged.connect(self._set_dps_mode)
         v.addWidget(C.Field("Meter size", size_seg))
         size_note = QtWidgets.QLabel(
-            "Small = just the DPS number · Medium = + graph and per-target bars · "
-            "Full = everything, including recent-cycle history.")
+            "Small = number · Medium = + graph · Full = + survivability.")
         size_note.setObjectName("Muted")
         size_note.setWordWrap(True)
         v.addWidget(size_note)
@@ -884,10 +985,39 @@ class ControlPanel(QtWidgets.QMainWindow):
         dsc.valueChanged.connect(self._set_dps_scale)
         v.addWidget(dsc)
 
-        note = QtWidgets.QLabel(
-            "Self DPS only. Per-skill and crit% are shown when the DamageDisplay "
-            "source is calibrated, otherwise team-total via HP-diff. Bosses are "
-            "always tracked regardless of range.")
+        # --- per-skill table columns (Skill Breakdown panel) --- experimental only;
+        # the columns configure the hidden Skill Breakdown panel, so skip the section
+        # in release builds (keep the attribute so _set_dps_columns stays safe).
+        self._dps_col_toggles = {}
+        if experimental_enabled():
+            from .skill_table import COLUMN_ORDER
+            v.addWidget(C.SectionHeader("Skill table columns"))
+            col_grid = QtWidgets.QGridLayout()
+            col_grid.setHorizontalSpacing(8)
+            col_grid.setVerticalSpacing(6)
+            chosen = set(self.s.dps_columns or [])
+            labels = {"total": "Total", "pct": "Percent", "dps": "DPS", "hits": "Hits",
+                      "crit": "Crit %", "max": "Max hit", "avg": "Avg hit", "min": "Min hit"}
+            for i, key in enumerate(COLUMN_ORDER):
+                t = C.LabeledToggle(labels.get(key, key.title()), key in chosen)
+                t.toggled.connect(lambda _on, k=key: self._set_dps_columns())
+                self._dps_col_toggles[key] = t
+                col_grid.addWidget(t, i // 2, i % 2)
+            v.addLayout(col_grid)
+
+        surv = C.LabeledToggle("Survivability strip (incoming DTPS · HP · death recap)",
+                               self.s.dps_survival)
+        surv.toggled.connect(lambda on: self._set("dps_survival", on))
+        v.addWidget(surv)
+
+        if experimental_enabled():
+            note_txt = (
+                "Self DPS only. Bosses always tracked. Per-skill capture is "
+                "experimental and can undercount; the total and by-enemy stay exact.")
+        else:
+            note_txt = (
+                "Self DPS only, with a per-enemy breakdown. Bosses always tracked.")
+        note = QtWidgets.QLabel(note_txt)
         note.setObjectName("Muted")
         note.setWordWrap(True)
         v.addWidget(note)
@@ -901,7 +1031,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         # --- Timer ---
         v.addWidget(C.SectionHeader("Timer"))
         card = C.OverlayCard("timer", "Open Speedrun Timer",
-                             "Big stopwatch — start/stop by hotkey, auto-stop on boss kill.")
+                             "Stopwatch with auto-stop on the boss kill.")
         card.toggled.connect(lambda on: self._request_overlay("speedrun", on))
         self._register_card("speedrun", card)
         v.addWidget(card)
@@ -913,16 +1043,19 @@ class ControlPanel(QtWidgets.QMainWindow):
         # --- Automation + upload ---
         v.addWidget(C.SectionHeader("Automation"))
         self._auto_toggle = C.LabeledToggle(
-            "Auto Detect Boss Run  ·  detects the dungeon, starts on your first move, "
-            "stops on the boss kill, and picks Normal/Hard from the boss level",
-            self.s.speedrun_auto)
+            "Auto Detect Boss Run", self.s.speedrun_auto)
         self._auto_toggle.toggled.connect(self._toggle_auto)
         v.addWidget(self._auto_toggle)
 
         self._auto_upload_toggle = C.LabeledToggle(
-            "Auto-upload finished runs to the leaderboard", self.s.speedrun_auto_upload)
+            "Auto-upload finished runs", self.s.speedrun_auto_upload)
         self._auto_upload_toggle.toggled.connect(self._toggle_auto_upload)
         v.addWidget(self._auto_upload_toggle)
+
+        rearm = C.LabeledToggle(
+            "Re-arm for back-to-back runs", self.s.speedrun_auto_rearm)
+        rearm.toggled.connect(lambda on: self._set("speedrun_auto_rearm", on))
+        v.addWidget(rearm)
 
         self._auto_upload_hint = QtWidgets.QLabel("")
         self._auto_upload_hint.setObjectName("Muted")
@@ -935,21 +1068,49 @@ class ControlPanel(QtWidgets.QMainWindow):
             "Hard" if self.s.speedrun_mode == "hard" else "Normal")
         mode_seg.currentChanged.connect(
             lambda t: self._set("speedrun_mode", "hard" if t == "Hard" else "normal"))
-        v.addWidget(C.Field("Upload runs as (fallback)", mode_seg))
-        mode_note = QtWidgets.QLabel(
-            "Used when Auto Detect Boss Run is off, or when the live boss level can't "
-            "be read. With auto on, the boss's live level vs its normal level picks "
-            "Normal vs Hard for you.")
-        mode_note.setObjectName("Muted")
-        mode_note.setWordWrap(True)
-        v.addWidget(mode_note)
+        f = C.Field("Difficulty fallback", mode_seg)
+        f.setToolTip("Used when auto-detect is off or the boss level can't be read.")
+        v.addWidget(f)
+
+        # --- Build linked to uploaded runs ---
+        v.addWidget(C.SectionHeader("Build"))
+        self._build_profile_lbl = QtWidgets.QLabel("")
+        self._build_profile_lbl.setObjectName("Muted")
+        self._build_profile_lbl.setWordWrap(True)
+        v.addWidget(self._build_profile_lbl)
+
+        self._build_override_toggle = C.LabeledToggle(
+            "Override build per run", self.s.speedrun_build_override_on)
+        self._build_override_toggle.toggled.connect(self._toggle_build_override)
+        v.addWidget(self._build_override_toggle)
+
+        # Override input box (revealed only when the toggle is on).
+        self._build_override_box = QtWidgets.QWidget()
+        bob = QtWidgets.QVBoxLayout(self._build_override_box)
+        bob.setContentsMargins(0, 0, 0, 0)
+        bob.setSpacing(6)
+        self._build_code_edit = QtWidgets.QLineEdit(self.s.speedrun_build_override or "")
+        self._build_code_edit.setPlaceholderText("Build code, e.g. ABCD1234 (or paste a build link)")
+        self._build_code_edit.setClearButtonEnabled(True)
+        self._build_code_edit.textEdited.connect(self._on_build_code_edited)
+        bob.addWidget(C.Field("Build code", self._build_code_edit))
+        self._build_preview_lbl = QtWidgets.QLabel("")
+        self._build_preview_lbl.setObjectName("Mono")
+        self._build_preview_lbl.setWordWrap(True)
+        bob.addWidget(self._build_preview_lbl)
+        v.addWidget(self._build_override_box)
+        self._build_override_box.setVisible(self.s.speedrun_build_override_on)
+
+        self._build_lookup_worker: _ApiWorker | None = None
+        self._refresh_profile_build()      # fetch + show the profile featured build
+        if self.s.speedrun_build_override and self.s.speedrun_build_override_on:
+            self._lookup_build(self.s.speedrun_build_override)
 
         # --- Co-runners (add friends to the run) ---
-        self._corunner_head = C.SectionHeader("Add friends to this run")
+        self._corunner_head = C.SectionHeader("Co-runners")
         v.addWidget(self._corunner_head)
         co_intro = QtWidgets.QLabel(
-            "Picked friends ride along as co-runners on auto-uploaded runs — each "
-            "with their linked build. Manage who's your friend on the Friends tab.")
+            "Picked friends ride along on auto-uploaded runs with their own build.")
         co_intro.setObjectName("Muted")
         co_intro.setWordWrap(True)
         v.addWidget(co_intro)
@@ -980,20 +1141,10 @@ class ControlPanel(QtWidgets.QMainWindow):
             hk.addWidget(C.Field(label, edit), 0, i)
         v.addLayout(hk)
 
-        # --- About / fair play ---
-        v.addWidget(C.SectionHeader("About"))
-        note = QtWidgets.QLabel(
-            "Start at the run's begin; it auto-stops when the dungeon boss dies "
-            "(or stop manually). Best time is kept per boss.")
-        note.setObjectName("Muted")
-        note.setWordWrap(True)
-        v.addWidget(note)
-
+        # --- Fair play ---
         fair = QtWidgets.QLabel(
-            "Fair play: uploaded runs post to the leaderboard instantly — only "
-            "suspicious times are held for review with a video. The companion is "
-            "read-only; manipulating the timer or cheating gets you banned and "
-            "excluded from the community.")
+            "Clean runs post instantly; suspicious times need a video. The "
+            "companion is read-only.")
         fair.setObjectName("Muted")
         fair.setWordWrap(True)
         fair.setStyleSheet(f"color:{theme.GOLD};background:transparent;")
@@ -1067,6 +1218,88 @@ class ControlPanel(QtWidgets.QMainWindow):
         self._set("speedrun_auto_upload", on)
         self._refresh_speedrun_gating()
 
+    # --- build linked to runs -------------------------------------------
+    def _toggle_build_override(self, on: bool):
+        self._set("speedrun_build_override_on", on)
+        self._build_override_box.setVisible(on)
+        if on and self.s.speedrun_build_override:
+            self._lookup_build(self.s.speedrun_build_override)
+
+    @staticmethod
+    def _build_code_from(text: str) -> str:
+        """Accept a bare code or a pasted build link; pull out the code token."""
+        s = (text or "").strip()
+        if "/" in s:
+            s = s.rstrip("/").split("/")[-1]
+        if "=" in s:                       # ?b=CODE / ?code=CODE
+            s = s.split("=")[-1]
+        return s.strip().upper()
+
+    def _on_build_code_edited(self, text: str):
+        code = self._build_code_from(text)
+        self._set("speedrun_build_override", code)
+        if not code:
+            self._build_preview_lbl.setText("")
+            return
+        self._build_preview_lbl.setText("resolving…")
+        self._build_preview_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
+        self._lookup_build(code)
+
+    def _lookup_build(self, code: str):
+        if not self.s.account_token:
+            self._build_preview_lbl.setText("sign in to resolve build codes")
+            self._build_preview_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
+            return
+        if self._build_lookup_worker is not None and self._build_lookup_worker.isRunning():
+            return
+        self._build_lookup_worker = _ApiWorker(
+            self.s.api_base, self.s.account_token,
+            lambda api, c=code: api.lookup_build(c), tag=code)
+        self._build_lookup_worker.done.connect(self._on_build_lookup)
+        self._build_lookup_worker.start()
+
+    def _on_build_lookup(self, tag: str, res: dict):
+        self._build_lookup_worker = None
+        # Ignore a stale result if the field moved on since the request fired.
+        if tag != (self.s.speedrun_build_override or "").strip().upper():
+            return
+        if res.get("ok"):
+            cls = res.get("class")
+            who = " · yours" if res.get("mine") else ""
+            self._build_preview_lbl.setText(
+                f"✓ {res.get('title') or res.get('code')}"
+                + (f"  ({cls}{who})" if cls or who else ""))
+            self._build_preview_lbl.setStyleSheet(f"color:{theme.GOOD};background:transparent;")
+        else:
+            self._build_preview_lbl.setText("✗ no build with that code")
+            self._build_preview_lbl.setStyleSheet(f"color:{theme.GOLD};background:transparent;")
+
+    def _refresh_profile_build(self):
+        """Show the profile's featured build (the default linked to uploads)."""
+        if not hasattr(self, "_build_profile_lbl"):
+            return
+        if not self.s.account_token:
+            self._build_profile_lbl.setText("Sign in to link your profile build.")
+            return
+        self._build_profile_lbl.setText("Profile build: loading…")
+        w = _ApiWorker(self.s.api_base, self.s.account_token, lambda api: api.me(), tag="me")
+        w.done.connect(self._on_profile_build)
+        w.start()
+        self._me_worker = w   # keep a ref so it isn't GC'd mid-flight
+
+    def _on_profile_build(self, tag: str, res: dict):
+        if not hasattr(self, "_build_profile_lbl"):
+            return
+        fb = (res.get("user") or {}).get("featured_build") if res.get("ok") else None
+        if fb:
+            cls = fb.get("class")
+            self._build_profile_lbl.setText(
+                f"Profile build: {fb.get('title') or fb.get('code')}"
+                + (f"  ({cls})" if cls else ""))
+        else:
+            self._build_profile_lbl.setText(
+                "No featured build set. Override per run below, or set one on the site.")
+
     def _refresh_speedrun_gating(self):
         """Auto-upload is only usable when Auto Detect Boss Run is on AND signed in."""
         if not hasattr(self, "_auto_upload_toggle"):
@@ -1076,10 +1309,11 @@ class ControlPanel(QtWidgets.QMainWindow):
         if not self.s.speedrun_auto:
             hint = "Turn on Auto Detect Boss Run to enable auto-upload."
         elif not logged_in:
-            hint = "Sign in (sidebar) to enable auto-upload — otherwise upload each run manually from the timer."
+            hint = "Sign in to auto-upload, or upload each run from the timer."
         else:
-            hint = "Clean runs post to the leaderboard instantly; only suspicious times need review + a video."
+            hint = ""
         self._auto_upload_hint.setText(hint)
+        self._auto_upload_hint.setVisible(bool(hint))
 
     def _set_speedrun_scale(self, vv):
         sc = vv / 100.0
@@ -1102,8 +1336,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         v.addWidget(C.SectionHeader("Friends", tag="ONLINE STATUS"))
 
         intro = QtWidgets.QLabel(
-            "Your Farever Pal friends and whether they're online. Add or accept "
-            "friends on the website — they appear here automatically.")
+            "Your friends and who's online. Add them on the website.")
         intro.setObjectName("Muted")
         intro.setWordWrap(True)
         v.addWidget(intro)
@@ -1638,42 +1871,200 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.status.setStyleSheet(
             f"color:{dot};font-family:'{theme.MONO_FONT}','Consolas';font-size:11px;")
 
-    def attach(self):
+    def attach(self, auto: bool = False):
+        self._attach_busy = True
         try:
             self.proc = Proc.attach()
         except ProcError as e:
-            self.log(f"ATTACH FAILED: {e}")
-            self._select_nav("log")
+            self.proc = None
+            self._attach_busy = False
+            if auto:
+                # Don't yank the user to the Log tab or spam: one line, then back
+                # off a few ticks (e.g. another tool holding the same hook site).
+                self._attach_cooldown = 5
+                self.log(f"Auto-attach deferred: {e} (retrying shortly).")
+                self._refresh_attach_status()
+            else:
+                self.log(f"ATTACH FAILED: {e}")
+                self._select_nav("log")
             return
         self.model = LiveModel(self.proc)
+        self._located_fail_logged = False
         self._set_status(True, f"attached PID {self.proc.pid} · locating player…")
         self.log(f"Attached PID {self.proc.pid}. {len(self.model.chests)} chests. "
                  "Locating the player via the read-only-effect hook…")
-        self.btn_attach.setEnabled(False)
         self._worker = _LocateWorker(self.model)
         self._worker.done.connect(self._on_located)
         self._worker.start()
 
     def _on_located(self, result):
-        self.btn_attach.setEnabled(True)
+        self._attach_busy = False
         if isinstance(result, Exception):
             self.log(f"Locate failed: {result}")
             self._set_status(True, "attached · player NOT found")
             return
         if not result:
-            self.log("Player not found. Be fully loaded in-world, then re-Attach.")
-            self._set_status(True, "attached · player NOT found")
+            # The watcher's RELOCATE retries each tick until the player loads in;
+            # log once so menu time doesn't fill the log.
+            if not getattr(self, "_located_fail_logged", False):
+                self.log("Player not found. Be fully loaded in-world (auto-retrying).")
+                self._located_fail_logged = True
+            self._set_status(True, "attached · waiting for world")
             return
+        self._located_shown = True
         self._set_status(True, f"attached PID {self.proc.pid} · player @ {result:#x}")
         self._set_overlay_cards_enabled(True)
         self.log(f"Player located @ {result:#x} (live hook slot; restored on detach). "
                  "Overlays unlocked.")
 
+    # --- auto-attach watcher --------------------------------------------
+    def _attach_tick(self):
+        """2 s poll: attach/locate/detach with the game, via the manual paths."""
+        if backend_name() == "none":
+            return
+        if self._attach_cooldown > 0:
+            self._attach_cooldown -= 1
+            return
+        try:
+            pid = find_pid()
+        except Exception:
+            return
+        act = self._auto.decide(
+            enabled=self.s.auto_attach,
+            running_pid=pid,
+            attached_pid=(self.proc.pid if self.proc else None),
+            located=bool(self.model and self.model.player_addr is not None),
+            busy=self._attach_busy,
+        )
+        if act is Act.ATTACH:
+            self.attach(auto=True)
+        elif act is Act.DETACH:
+            self._auto_detach()
+        elif act is Act.RELOCATE:
+            self._relocate()
+        if act is Act.NONE:
+            self._refresh_attach_status()
+        # The read-only player hook fills `player_addr` on its own the instant the
+        # world finishes loading — which can happen between locate workers, right
+        # as decide() flips to NONE (it stops issuing RELOCATE once located). The
+        # 'located' UI transition normally only fires from a worker's _on_located,
+        # so without this reconciliation the top bar can stay stuck at "waiting for
+        # world" while the player IS in fact located. Apply the transition once.
+        if self.proc is not None and not self._attach_busy:
+            pa = self.model.player_addr if self.model else None
+            if pa is not None and not self._located_shown:
+                self._on_located(pa)
+            elif pa is None and self._located_shown:
+                self._located_shown = False
+                self._set_overlay_cards_enabled(False)
+
+    def _relocate(self):
+        """Quietly re-run the locate worker (attached but not yet in-world)."""
+        if self.model is None or self._attach_busy:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._attach_busy = True
+        self._worker = _LocateWorker(self.model)
+        self._worker.done.connect(self._on_located)
+        self._worker.start()
+
+    def _auto_detach(self):
+        """Detach because the game closed/restarted; the watcher re-attaches
+        automatically when it relaunches."""
+        self.detach()
+        self.log("Game closed — detached. Watching for Farever…")
+        self._refresh_attach_status()
+
+    def _refresh_attach_status(self):
+        """When detached, reflect the watcher state in the top-bar status line.
+
+        Auto-attach is always on (no UI toggle); `auto_attach` survives as a
+        hidden settings.json escape hatch — if a user sets it false there, the
+        watcher stops attaching and we just read "detached"."""
+        if self.proc is not None:
+            return
+        if self.s.auto_attach and backend_name() != "none":
+            self._set_status(False, "watching for Farever…")
+        else:
+            self._set_status(False, "detached")
+
+    # --- self-update ----------------------------------------------------
+    def _on_update_found(self, info):
+        if info is None:
+            return
+        self._update_info = info
+        self._update_btn.setText(f"↑  Update to v{info.version}")
+        self._update_btn.setEnabled(True)
+        self._update_btn.setVisible(True)
+        self.log(f"Update available: v{__version__} → v{info.version}. "
+                 "Click the sidebar button to install.")
+
+    def _on_update_clicked(self):
+        info = self._update_info
+        if info is None or self._updating:
+            return
+        # From source (dev) the self-swap can't work — just open the release page.
+        if not updater.is_frozen():
+            import webbrowser
+            webbrowser.open(info.html_url or f"{self.s.api_base}/download.php")
+            return
+        notes = (info.notes or "").strip()
+        if len(notes) > 600:
+            notes = notes[:600] + "…"
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Update Farever Pal")
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setText(f"Update from v{__version__} to v{info.version}?\n\n"
+                    "The app will download the new version, restart, and reconnect "
+                    "automatically.")
+        if notes:
+            box.setInformativeText(notes)
+        box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        box.setDefaultButton(QtWidgets.QMessageBox.Yes)
+        if box.exec() != QtWidgets.QMessageBox.Yes:
+            return
+        self._updating = True
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("Downloading…  0%")
+        self.log(f"Downloading v{info.version}…")
+        self._update_dl_worker = _UpdateDownloadWorker(info)
+        self._update_dl_worker.progress.connect(self._on_update_progress)
+        self._update_dl_worker.done.connect(self._on_update_downloaded)
+        self._update_dl_worker.start()
+
+    def _on_update_progress(self, pct: int):
+        self._update_btn.setText(f"Downloading…  {pct}%")
+
+    def _on_update_downloaded(self, result):
+        if isinstance(result, Exception):
+            self._updating = False
+            self._update_btn.setEnabled(True)
+            self._update_btn.setText(f"↑  Update to v{self._update_info.version} (retry)")
+            self.log(f"Update failed: {result}")
+            QtWidgets.QMessageBox.warning(
+                self, "Update failed",
+                f"Couldn't install the update:\n{result}\n\n"
+                "You can retry, or download it from the website.")
+            return
+        # Staged successfully: restore the game hook, swap the exe, relaunch, quit.
+        self.log(f"Installing v{self._update_info.version} and restarting…")
+        try:
+            self.detach()                       # release the game cleanly first
+            updater.apply_and_relaunch(result)
+        except Exception as e:
+            self._updating = False
+            self._update_btn.setEnabled(True)
+            self.log(f"Update install failed: {e}")
+            QtWidgets.QMessageBox.warning(self, "Update failed", str(e))
+            return
+        QtWidgets.QApplication.quit()
+
     def _make_overlay(self, key: str):
         if key == "crosshair":
             return CrosshairOverlay(self.s)
-        cls = {"entity": EntityOverlay, "dps": DpsOverlay, "map": MinimapOverlay,
-               "speedrun": SpeedrunOverlay}[key]
+        cls = {"entity": EntityOverlay, "dps": DpsOverlay, "skills": SkillOverlay,
+               "map": MinimapOverlay, "speedrun": SpeedrunOverlay}[key]
         ov = cls(self.model, self.s)
         if hasattr(ov, "request_config"):
             ov.request_config.connect(self._raise_self)
@@ -1718,6 +2109,10 @@ class ControlPanel(QtWidgets.QMainWindow):
             card.set_checked_silent(visible)
 
     def detach(self):
+        """Tear down the live session (overlays, hook, handle). Called only by the
+        watcher (game closed) and on app close — there is no manual detach."""
+        self._attach_busy = False
+        self._located_shown = False
         for key, ov in list(self.overlays.items()):
             if ov is not None:
                 ov.close()
@@ -1732,8 +2127,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.proc = None
         self.model = None
         self._set_overlay_cards_enabled(False)
-        self._set_status(False, "detached")
-        self.log("Detached. (Crosshair stays available — it needs no game.)")
+        self._set_status(False, "detached")    # caller refreshes the watch line
 
     # ====================================================================
     #  Loot prediction
@@ -1797,9 +2191,19 @@ class ControlPanel(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
+            self._attach_timer.stop()
+        except Exception:
+            pass
+        try:
             self._friends_timer.stop()
             if self._friends_worker is not None and self._friends_worker.isRunning():
                 self._friends_worker.wait(1500)
+        except Exception:
+            pass
+        try:
+            if self._update_check_worker is not None and self._update_check_worker.isRunning():
+                self._update_check_worker.wait(1500)
+            # the download worker is left to finish if a swap is mid-flight
         except Exception:
             pass
         self.detach()
