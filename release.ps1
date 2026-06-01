@@ -24,6 +24,31 @@ $exe     = Join-Path $PSScriptRoot 'dist\FareverPal.exe'
 
 Write-Host "Farever Pal version: $version  (tag $tag)"
 
+# --- pre-flight integrity guard ------------------------------------------
+# Prevents re-shipping a gate-stripped build like v0.1.3, which installed the
+# memory-WRITE code hook by default because the exe was built from uncommitted
+# local edits that deleted the read-only gate. Abort if:
+#   1) the working tree is dirty (the released exe must come from committed
+#      source, never local edits), or
+#   2) the read-only gate (FAREVER_ENABLE_HOOK) is missing from config.py or
+#      model.py (someone stripped it).
+$dirty = git status --porcelain
+if ($LASTEXITCODE -ne 0) { throw "git status failed; cannot verify a clean tree." }
+if ($dirty) {
+    Write-Host $dirty
+    throw "Working tree is dirty. Commit or stash all changes before releasing - the release exe must be built from committed source (prevents shipping uncommitted gate-stripped edits like v0.1.3)."
+}
+
+$configPy = Join-Path $PSScriptRoot 'farever_companion\config.py'
+$modelPy  = Join-Path $PSScriptRoot 'farever_companion\core\model.py'
+foreach ($f in @($configPy, $modelPy)) {
+    if (-not (Test-Path $f)) { throw "Missing $f; cannot verify the read-only gate." }
+    if (-not (Select-String -Path $f -Pattern 'FAREVER_ENABLE_HOOK' -Quiet)) {
+        throw "Read-only gate missing: 'FAREVER_ENABLE_HOOK' not found in $f. The hook gate was stripped - refusing to release (this is exactly the v0.1.3 regression)."
+    }
+}
+Write-Host "Pre-flight OK: clean tree + read-only gate present in config.py and model.py."
+
 # --- confirm auth ---
 gh auth status
 if ($LASTEXITCODE -ne 0) { throw "Not authenticated. Run 'gh auth login' first." }
