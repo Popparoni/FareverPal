@@ -4,6 +4,9 @@ cd /d %~dp0
 
 echo [1/2] Building Rust memory reader (farever_native)...
 set PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
+REM Strip the leaked cargo/user path from panic strings in the shipped binary
+REM (otherwise the absolute %USERPROFILE% build path leaks into release panics).
+set RUSTFLAGS=--remap-path-prefix=%USERPROFILE%=.
 .venv\Scripts\python.exe -m maturin develop --release -m native\Cargo.toml
 if errorlevel 1 goto err
 

@@ -2,29 +2,14 @@
 setlocal
 cd /d %~dp0
 
-REM Build the one-file exe. Bundles the CDB sheets, icons, wiki data and chest
-REM positions, plus this app's own assets (UI fonts + chrome SVG icons), so the
-REM packaged app is self-contained (paths.py resolves game data from the
-REM PyInstaller _MEIPASS dir, and assets_dir() resolves _MEIPASS\assets). Build
-REM the Rust ext first (build.bat). To brand the .exe, drop an app_icon.ico in
-REM assets\ and add:  --icon assets\app_icon.ico
+REM Build the one-file exe from the committed spec (FareverPal.spec) so the
+REM exact bundle contents are version controlled and can't drift between
+REM machines. The spec bundles this app's own assets (always) plus the sibling
+REM monorepo game data (..\data\sheets, ..\htdocs\assets\... ) ONLY if present,
+REM collects the farever_native binary, excludes unused Qt modules, and never
+REM bundles the private notes\ dir. Build the Rust ext first (build.bat).
 
-.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed ^
-  --name FareverPal ^
-  --icon assets\app_icon.ico ^
-  --collect-all PySide6 ^
-  --collect-binaries farever_native ^
-  --add-data "..\data\sheets;data\sheets" ^
-  --add-data "..\htdocs\assets\icons;htdocs\assets\icons" ^
-  --add-data "..\htdocs\assets\data;htdocs\assets\data" ^
-  --add-data "..\notes;notes" ^
-  --add-data "assets\fonts;assets\fonts" ^
-  --add-data "assets\icons_ui;assets\icons_ui" ^
-  --add-data "assets\map;assets\map" ^
-  --add-data "assets\map_icons;assets\map_icons" ^
-  --add-data "assets\app_icon.png;assets" ^
-  --add-data "assets\app_icon.ico;assets" ^
-  run.py
+.venv\Scripts\python.exe -m PyInstaller --noconfirm FareverPal.spec
 
 echo.
 echo If it built, the exe is in dist\FareverPal.exe

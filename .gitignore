@@ -9,6 +9,9 @@ env/
 dist/
 build/
 *.spec
+# ...but the committed FareverPal build spec IS tracked (single source of build
+# truth; prevents shipping a bundle built from uncommitted local state).
+!FareverPal.spec
 
 # --- Rust build output (farever_native) ---
 native/target/
