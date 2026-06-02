@@ -9,12 +9,10 @@ from farever_companion.geo import chests
 
 
 def _game_data_present() -> bool:
-    """True if the monorepo game data this module needs is reachable: the CDB
-    sheets (data/sheets/lootTable.json) AND the chest position/index files
-    (notes/chest_positions.json, notes/chest_loot_index.json). False in CI,
-    which checks out only this repo without the private monorepo -> these
-    data-dependent tests skip. They still run locally with the monorepo present
-    (assertions unchanged)."""
+    """True if the optional game data this module needs is reachable: the CDB
+    sheets (data/sheets/lootTable.json) AND the chest position/index files.
+    False when that data isn't present in the checkout -> these data-dependent
+    tests skip. They run wherever the data is present (assertions unchanged)."""
     try:
         return ((paths.sheets_dir() / "lootTable.json").exists()
                 and paths.chest_positions_path().exists()
@@ -25,7 +23,7 @@ def _game_data_present() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _game_data_present(),
-    reason="requires monorepo game data (data/sheets/*.json + notes/chest_*.json)")
+    reason="requires game data (data/sheets/*.json + chest index files)")
 
 
 def test_predictor_returns_sorted_rows():

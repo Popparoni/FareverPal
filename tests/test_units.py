@@ -6,10 +6,10 @@ from farever_companion.data import units, rarity
 
 
 def _game_data_present() -> bool:
-    """True if the monorepo CDB sheets are reachable (data/sheets/lootTable.json
-    marker resolves). False in CI, which checks out only this repo without the
-    private monorepo -> these data-dependent tests skip. They still run locally
-    where the monorepo data is present (assertions unchanged)."""
+    """True if the optional CDB sheets are reachable (data/sheets/lootTable.json
+    marker resolves). False when the game data isn't present in the checkout ->
+    these data-dependent tests skip. They run wherever the data is present
+    (assertions unchanged)."""
     try:
         return (paths.sheets_dir() / "lootTable.json").exists()
     except Exception:
@@ -18,7 +18,7 @@ def _game_data_present() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _game_data_present(),
-    reason="requires monorepo game data (data/sheets/*.json)")
+    reason="requires game data (data/sheets/*.json)")
 
 
 def test_named_bosses_are_the_ten():

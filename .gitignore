@@ -10,7 +10,7 @@ dist/
 build/
 *.spec
 # ...but the committed FareverPal build spec IS tracked (single source of build
-# truth; prevents shipping a bundle built from uncommitted local state).
+# truth).
 !FareverPal.spec
 
 # --- Rust build output (farever_native) ---
@@ -42,17 +42,16 @@ id_rsa*
 Thumbs.db
 desktop.ini
 
-# --- internal / scratch (never publish) ---
-_re_*.py
-_diag_*.py
-_reflect_dump.txt
+# --- local scratch / working files ---
+_scratch*.py
+_tmp*.py
 *_dump.txt
+*.txt.tmp
 notes/
-PLAN.md
-*_PLAN.md
-docs/MEMORY_INTERNALS.md
+*PLAN.md
+docs/*_INTERNALS.md
 
-# --- AI assistant / internal docs (never publish) ---
+# --- local tooling / editor config ---
 CLAUDE.md
 **/CLAUDE.md
 .claude/

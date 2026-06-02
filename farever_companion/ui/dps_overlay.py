@@ -4,7 +4,7 @@ Big live DPS, a sparkline, a survivability strip (incoming DTPS, own HP, death
 recap), and reviewable recent-cycle history with a local personal-best parse per
 boss. The per-skill breakdown lives in its own Skills panel (skill_overlay.py) so
 this stays uncrowded. Self DPS only (self-only by design, the game only renders
-a DamageDisplay for your own client; see CLAUDE.md). Read-only.
+a DamageDisplay for your own client). Read-only.
 """
 from __future__ import annotations
 

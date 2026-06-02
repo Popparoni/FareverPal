@@ -4,10 +4,10 @@ cd /d %~dp0
 
 REM Build the one-file exe from the committed spec (FareverPal.spec) so the
 REM exact bundle contents are version controlled and can't drift between
-REM machines. The spec bundles this app's own assets (always) plus the sibling
-REM monorepo game data (..\data\sheets, ..\htdocs\assets\... ) ONLY if present,
-REM collects the farever_native binary, excludes unused Qt modules, and never
-REM bundles the private notes\ dir. Build the Rust ext first (build.bat).
+REM machines. The spec bundles this app's own assets (always) plus optional
+REM sibling game data (..\data\sheets, ..\htdocs\assets\... ) ONLY if present,
+REM collects the farever_native binary, and excludes unused Qt modules. Build
+REM the Rust ext first (build.bat).
 
 .venv\Scripts\python.exe -m PyInstaller --noconfirm FareverPal.spec
 

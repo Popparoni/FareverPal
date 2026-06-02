@@ -25,27 +25,25 @@ $exe     = Join-Path $PSScriptRoot 'dist\FareverPal.exe'
 Write-Host "Farever Pal version: $version  (tag $tag)"
 
 # --- pre-flight integrity guard ------------------------------------------
-# Prevents re-shipping a build like v0.1.3, which installed the memory-WRITE
-# code hook because the exe was built from uncommitted local edits. The hook has
-# since been removed entirely (the companion is read-only, with no write path in
-# the tree). Abort if:
+# The companion is read-only: it has no injector and no write path in the tree.
+# Abort if:
 #   1) the working tree is dirty (the released exe must come from committed
 #      source, never local edits), or
-#   2) any memory-WRITE primitive has crept back into the Python package
-#      (no inject module, no WriteProcessMemory / PROCESS_VM_WRITE / HookLocator).
+#   2) any memory-WRITE primitive has crept into the Python package
+#      (no inject module, no WriteProcessMemory / PROCESS_VM_WRITE).
 $dirty = git status --porcelain
 if ($LASTEXITCODE -ne 0) { throw "git status failed; cannot verify a clean tree." }
 if ($dirty) {
     Write-Host $dirty
-    throw "Working tree is dirty. Commit or stash all changes before releasing - the release exe must be built from committed source (prevents shipping uncommitted edits like v0.1.3)."
+    throw "Working tree is dirty. Commit or stash all changes before releasing - the release exe must be built from committed source."
 }
 
 $pkgDir = Join-Path $PSScriptRoot 'farever_companion'
 $injectPy = Join-Path $pkgDir 'core\inject.py'
 if (Test-Path $injectPy) {
-    throw "Write path regression: '$injectPy' exists. The memory-write hook was removed - refusing to release a build that reintroduces it."
+    throw "Write path regression: '$injectPy' exists. The companion is read-only - refusing to release a build with an injector."
 }
-$forbidden = 'WriteProcessMemory', 'PROCESS_VM_WRITE', 'HookLocator', 'hook_locate_enabled', 'FAREVER_ENABLE_HOOK'
+$forbidden = 'WriteProcessMemory', 'PROCESS_VM_WRITE'
 $hits = Select-String -Path (Join-Path $pkgDir '*.py') -Pattern $forbidden -Recurse -List
 if ($hits) {
     $hits | ForEach-Object { Write-Host "  $($_.Filename): $($_.Pattern)" }

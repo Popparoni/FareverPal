@@ -4,10 +4,10 @@
 # one-file exe on Windows, uploading it as a build-verification artifact.
 #
 # NOTE: this is build verification only. The data-dependent tests self-skip
-# because the game-data sheets live in a separate PRIVATE monorepo that isn't
-# checked out here; full RELEASES (with those sheets bundled) are built and cut
-# separately from the monorepo (see release.ps1). This workflow guarantees the
-# code compiles, the read-only-default tests pass, and the exe packages.
+# when the optional game-data sheets aren't present in the checkout (they are
+# not part of this repo); full releases are built and cut separately (see
+# release.ps1). This workflow guarantees the code compiles, the read-only tests
+# pass, and the exe packages.
 name: CI
 
 on:

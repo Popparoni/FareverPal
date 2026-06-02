@@ -1,19 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for FareverPal (committed; the single source of build truth).
+"""PyInstaller spec for FareverPal — the single source of build truth.
 
-Replaces the long package.bat CLI so the exact bundle contents are version
-controlled and can't drift between machines (the v0.1.3 incident was a build
-from uncommitted local state). Build with:
+Committed so the exact bundle contents are version controlled and don't drift
+between machines. Build with:
 
     pyinstaller --noconfirm FareverPal.spec
 
 Key properties:
   - one-file, windowed, branded with assets/app_icon.ico.
-  - In-repo assets are always bundled. Sibling game-data dirs from the private
-    monorepo (../data/sheets, ../htdocs/assets/...) are added ONLY if present,
-    so a local monorepo build ships full data while a bare CI checkout (no
-    monorepo) still builds a verification artifact.
-  - notes/ is NEVER bundled (it's private/internal).
+  - In-repo assets are always bundled. Optional sibling game-data dirs
+    (../data/sheets, ../htdocs/assets/...) are added ONLY if present, so a full
+    local build ships the data while a bare checkout (e.g. CI) still builds a
+    verification artifact.
   - Unused Qt modules are excluded to trim the bundle; only QtCore/QtGui/
     QtWidgets/QtSvg (+ the Windows platform plugin via PySide6's hook) are kept.
 """
@@ -40,11 +38,10 @@ datas = [
     ("assets/app_icon.ico", "assets"),
 ]
 
-# --- data: sibling game-data dirs from the private monorepo (optional) ------
-# Added only if they exist next to this repo, so local full-data builds include
-# the CDB sheets + wiki data + icons, while CI (which checks out only this repo,
-# without the monorepo) still builds successfully without them. notes/ is never
-# included here.
+# --- data: optional sibling game-data dirs ---------------------------------
+# Added only if they exist next to this repo, so a full local build includes the
+# CDB sheets + wiki data + icons, while a bare checkout (e.g. CI) still builds
+# successfully without them.
 for _rel, dst in (
     (os.path.join("..", "data", "sheets"), "data/sheets"),
     (os.path.join("..", "htdocs", "assets", "icons"), "htdocs/assets/icons"),

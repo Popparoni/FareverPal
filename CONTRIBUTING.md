@@ -3,17 +3,17 @@
 Thanks for wanting to help. This guide gets you from a fresh clone to a running
 build and a green test suite, then points you at the deeper docs.
 
-If you (or your AI assistant) are new here, read in this order:
-`CLAUDE.md` → `docs/ARCHITECTURE.md` → the source for the area you're touching
+If you're new here, read in this order:
+this guide → `docs/ARCHITECTURE.md` → the source for the area you're touching
 (`core/` + `combat/` for the live model, `ui/` for the interface).
 
 ## The one thing to internalise first
 
 Farever Pal is **read-only and out-of-process**. It reads the game's memory from
 a separate process and never writes to the game, injects code, automates input,
-or touches the network. Every contribution must keep that true. See `CLAUDE.md`
-for the full rule set — it's not negotiable, it's the reason the tool is safe to
-run.
+or touches the network. Every contribution must keep that true. See
+`docs/ARCHITECTURE.md` for the full rule set — it's not negotiable, it's the
+reason the tool is safe to run.
 
 ## Prerequisites
 
@@ -118,7 +118,7 @@ through `LiveModel`. Keeping that boundary is what lets the logic stay testable.
    constants).
 5. `pytest -q` must be green.
 6. Match the surrounding style. Sharp-corner dark UI for anything visual (see
-   `CLAUDE.md`).
+   `docs/ARCHITECTURE.md`).
 
 ## PR checklist
 

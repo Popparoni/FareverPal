@@ -9,8 +9,7 @@ and `combat/` source is the reference for the live model itself.
 Farever is a Heaps-engine game running on the **HashLink VM**. HashLink keeps
 full runtime type information on every heap object, which is the entire reason
 this tool is feasible: we can read an object's class name, walk its super-chain,
-and read its fields straight out of another process's memory. The game ships
-with no anti-cheat.
+and read its fields straight out of another process's memory.
 
 Farever Pal is **out-of-process and read-only**. It is four layers, bottom to top:
 
