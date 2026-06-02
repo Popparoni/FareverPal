@@ -386,8 +386,10 @@ class SpeedrunOverlay(OverlayWindow):
             mode, src = self._run_mode, (self._run_mode_src or "manual")
         else:
             mode, src = self._live_mode, self._live_mode_src
-        # Nothing detected yet, or fully manual stopwatch with no boss in sight.
-        if not mode or not (self._dungeon_bid or t.boss_id):
+        # Show an AUTO-detected difficulty wherever it resolved (a recognized boss
+        # OR the enemy-fleet read in a boss-less dungeon like the bee one). Only the
+        # MANUAL fallback needs a boss/dungeon context to avoid showing in town.
+        if not mode or (src != "auto" and not (self._dungeon_bid or t.boss_id)):
             self.mode_lbl.hide()
             return
         if src == "auto":

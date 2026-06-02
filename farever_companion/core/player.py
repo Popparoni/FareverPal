@@ -1,7 +1,10 @@
 """Pure-read player locator — no hook, no writes.
 
-Locates the local player's `ent.Hero` struct entirely by reading + scanning,
-using the Rust `find_bytes`. Strategy (write-free, see PLAN §4.2):
+The PRIMARY locate is the scan-free GameApp-singleton anchor in
+`appsingleton.py` (session-stable, unambiguous). This module keeps a heap-scan
+FALLBACK for unexpected build layouts: it locates the local player's `ent.Hero`
+struct entirely by reading + scanning with the Rust `find_bytes`. Fallback
+strategy (write-free):
 
   1. Bootstrap the `ent.Hero` hl_type by string:
        a. scan for the UTF-16 class name "ent.Hero\\0"  -> name string addr
@@ -23,24 +26,16 @@ from __future__ import annotations
 import struct
 
 from .appsingleton import GameAppLocator
-from .hl import Hl, is_ptr, _HOBJ
+from .hl import Hl, is_ptr, _HOBJ, utf16z as _utf16z
 from .proc import Proc, ProcError
+from .constants import TO_NAME, OFF_HEADING, OFF_POS as OFF_XYZ
 from .scene import OFF_GAMELAYER, OFF_UNITS_ARR
 
-# --- calibrate live (PLAN §7); None => use the fallback heuristic ---------
+# --- calibrate live; None => use the fallback heuristic -------------------
 OFF_HERO_OWNERPLAYER: int | None = None   # ent.Hero -> st.Player
 OFF_PLAYER_ISME: int | None = None        # st.Player.isMe (i32/bool)
 OFF_PLAYER_HERO: int | None = None        # st.Player.hero -> ent.Hero
 OFF_HERO_ISCOMBAT: int | None = None      # ent.Hero.isInCombat (bool)
-
-TO_NAME = 0x10   # hl_type_obj.name offset (matches hl.TO_NAME)
-
-OFF_XYZ = 0x98       # x,y,z contiguous f64 in the player struct
-OFF_HEADING = 0xB0   # facing angle, f64 radians (atan2: 0=+x, CCW), calibrated live
-
-
-def _utf16z(s: str) -> bytes:
-    return s.encode("utf-16-le") + b"\x00\x00"
 
 
 class PlayerLocator:
@@ -130,7 +125,13 @@ class PlayerLocator:
         if hero is not None and self.hl.class_of(hero) == "ent.Hero":
             self.address = hero
             return hero
-        # Fallback: scan the heap for ent.Hero and disambiguate (old method).
+        # Anchor IS resolved but there's no hero right now (main menu / loading
+        # transition). Don't fall back to the expensive heap scan every relocate
+        # tick — the anchor produces the hero again on its own once back in-world.
+        if self.app.anchored:
+            self.address = None
+            return None
+        # Anchor never resolved (unexpected build): heap-scan fallback (old method).
         cands = self._candidates()
         if not cands:
             self.address = None
@@ -149,13 +150,37 @@ class PlayerLocator:
         return self.locate()
 
     # --- reads -----------------------------------------------------------
-    def pbase(self) -> int | None:
+    def live_address(self) -> int | None:
+        """The current local hero, re-resolved cheaply each call so it FOLLOWS
+        menu<->world and character changes with no rescan.
+
+        When the GameApp anchor is resolved (the normal path), this re-reads
+        `GameApp.hero` every call: at the main menu that field is null, so this
+        returns None (and the attach watcher re-applies 'located' the moment you
+        load back in). Only the heap-scan fallback build — where the anchor never
+        resolves — uses the last located address, re-validated so a stale pointer
+        after a zone change still degrades to None instead of reading garbage."""
+        if self.app.anchored:
+            hero = self.app.live_hero()
+            if hero is not None and self.hl.class_of(hero) == "ent.Hero":
+                self.address = hero
+                return hero
+            self.address = None       # menu / transition: no live hero right now
+            return None
+        # heap-scan fallback build: keep the last address but drop it if it's no
+        # longer a live Hero (zone change freed/reused it).
+        if self.address is not None and self.hl.class_of(self.address) != "ent.Hero":
+            self.address = None
         return self.address
 
+    def pbase(self) -> int | None:
+        return self.live_address()
+
     def read_xyz(self) -> tuple[float, float, float] | None:
-        if not self.address:
+        base = self.live_address()
+        if not base:
             return None
-        raw = self.proc.try_read(self.address + OFF_XYZ, 24)
+        raw = self.proc.try_read(base + OFF_XYZ, 24)
         if raw is None:
             return None
         return struct.unpack("<ddd", raw)
@@ -163,9 +188,10 @@ class PlayerLocator:
     def read_heading(self) -> float | None:
         """Player facing in radians (atan2: 0=+x, CCW). Pure read of the heading
         field in the player struct; holds when still, updates while turning."""
-        if not self.address:
+        base = self.live_address()
+        if not base:
             return None
-        raw = self.proc.try_read(self.address + OFF_HEADING, 8)
+        raw = self.proc.try_read(base + OFF_HEADING, 8)
         if raw is None:
             return None
         return struct.unpack("<d", raw)[0]

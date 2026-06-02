@@ -10,9 +10,9 @@ Boss detection (broadened vs the old tool, which only matched id==table):
   1. NAMED bosses: a unit whose id also names a loot table (MunsterChuck unit
      -> MunsterChuck table). Their signature drops live there, not in the
      generic type table. (10 of these.)
-  2. FLAGS bit: bosses/elites carry a flag bit in unit.flags. The exact bit is
-     calibrated live (see PLAN §3/8); BOSS_FLAG_BIT stays None until then, and
-     this path is a no-op so we never mislabel.
+  2. FLAGS bit: bosses/elites carry a flag bit in unit.flags. The exact bit
+     needs live calibration; BOSS_FLAG_BIT stays None until then, and this path
+     is a no-op so we never mislabel.
 
 Determinism: every function here is PURE (depends only on the CDB), so a given
 unit-id always resolves to the same table — the source of the old "loot shows
@@ -24,9 +24,12 @@ from functools import lru_cache
 
 from . import cdb, loot
 
-# Calibrated live: the bit in unit.flags that marks a boss/elite. None = unknown
-# (the flags path is disabled, named-boss detection still works).
-BOSS_FLAG_BIT: int | None = None
+# The bit in unit.flags that marks a boss. Calibrated from the CDB: exactly 13 of
+# 403 units carry 0x10 — all 10 named bosses PLUS Phrixes/PhrixesP1/Ulserous
+# (bosses whose id doesn't name a loot table, so the named-list missed them), and
+# zero trash mobs. So 0x10 cleanly identifies bosses and broadens detection beyond
+# the named list.
+BOSS_FLAG_BIT: int | None = 0x10
 
 
 @lru_cache(maxsize=1)

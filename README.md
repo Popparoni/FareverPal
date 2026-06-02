@@ -21,6 +21,36 @@ It is out-of-process and write-free, so it **cannot freeze or crash the game**
 > It reads the game's memory from a separate process and **never writes to the
 > game or injects any code.**
 
+## How it works (overview)
+
+The whole bet is that an external reader plus a separate Qt window can surface
+live info **without ever touching the game's process state** — so it can't crash,
+freeze, or alter the game.
+
+- **Out-of-process, read-only.** A small Rust extension opens the game with a
+  read-only handle (no write / alloc / protect access) and exposes only reads and
+  a memory scan. There is no write path anywhere in the tree, and a test enforces
+  that.
+- **Reflection, not hard-coded addresses.** The game runs on HashLink, which keeps
+  class and field names in the runtime. The app reads those to identify objects by
+  *name* (your character, enemies, chests, …) rather than relying on brittle fixed
+  addresses, so it tends to survive game updates.
+- **A stable anchor for the player.** Instead of rescanning a multi-GB heap on
+  every zone change, it resolves one long-lived game object and follows it to your
+  character each frame — so tracking keeps working across loads and menus with no
+  repeated scan.
+- **Batched scene reads.** Each frame it pulls the live unit / interactible lists
+  in as few reads as possible, then interprets them in Python for the overlays.
+- **Loot is predicted entirely offline.** Drop tables come from the game's own data
+  files (CastleDB); the tool never reads or influences a live roll — drops are
+  server-authoritative, which a client cannot change.
+- **DPS** comes from watching enemy health fall over time, plus the game's own
+  on-screen damage numbers for the per-skill breakdown. Self only.
+
+This overview deliberately leaves out the low-level specifics (exact offsets,
+pointer chains, scan signatures). The tool exists to *read* derived, public-facing
+information for a fan wiki and personal QA — not to hand out a recipe for tampering.
+
 ## Layout
 
 ```
@@ -73,15 +103,18 @@ package.bat      :: runs PyInstaller -> dist\FareverPal.exe (bundles sheets + ic
 
 1. Launch Farever and load fully into the world. If you have another memory
    tool attached to the game, unload it first to avoid a conflict.
-2. Run the app, press **Attach**. It scans for your `ent.Hero` (a few seconds).
+2. Run the app — it attaches **automatically** when Farever is running and locates
+   your character once you're in-world (no button; the status line shows when it's
+   ready and follows you across zones/menus).
 3. Open the overlays. Drag them by their title bars; set opacity / click-through
    in the control panel.
 
 ## Status
 
-Phases 1–5 built and headless-validated; per-skill DPS (DamageDisplay field
-offsets) and the player-select `isMe` fields are **calibrated live**.
-Live testing is the remaining step.
+The core overlays (entity/loot, DPS, minimap) and the read-only player locate are
+**live-validated**. Per-skill DPS stays behind an experimental flag (incomplete
+coverage). Some newer pieces (e.g. speedrun difficulty auto-detect) are still
+being refined.
 
 ## Credits & third-party work
 

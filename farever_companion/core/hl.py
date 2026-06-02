@@ -23,25 +23,21 @@ from __future__ import annotations
 import struct
 
 from .proc import Proc, ProcError
-
-_HOBJ = 11
-_HSTRUCT = 21
-_USER_MIN = 0x10000
-_USER_MAX = 0x7FFFFFFFFFFF
-
-# hl_type_obj field offsets
-TO_NAME = 0x10
-TO_SUPER = 0x18
-TO_FIELDS = 0x20
-FIELD_STRIDE = 0x18      # sizeof(hl_obj_field) on 64-bit
-
-# array layout (post-patch)
-NA_SIZE_OFF = 0x10
-NA_DATA_OFF = 0x18
+from .constants import (
+    HOBJ as _HOBJ, HSTRUCT as _HSTRUCT, USER_MIN as _USER_MIN,
+    USER_MAX as _USER_MAX, TO_NAME, TO_SUPER, TO_FIELDS, FIELD_STRIDE,
+    NA_SIZE_OFF, NA_DATA_OFF,
+)
 
 
 def is_ptr(v: int | None) -> bool:
     return v is not None and _USER_MIN < v < _USER_MAX
+
+
+def utf16z(s: str) -> bytes:
+    """A UTF-16LE, null-terminated class/name needle for a memory scan. Shared
+    by the locators (appsingleton.py, player.py)."""
+    return s.encode("utf-16-le") + b"\x00\x00"
 
 
 class Hl:
@@ -172,7 +168,8 @@ class Hl:
     def field_names(self, type_ptr: int) -> list[str]:
         """Declared field names of an object type (own fields only), in order.
         Reliable from hl_obj_field; byte offsets need live calibration (the
-        runtime object's fields_indexes) — see PLAN §4.2."""
+        runtime object's fields_indexes), which is why the readers in core/ use
+        named, live-validated byte offsets rather than deriving them here."""
         if not is_ptr(type_ptr):
             return []
         try:

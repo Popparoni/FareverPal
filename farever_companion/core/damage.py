@@ -15,7 +15,7 @@ event reads as `kind="damage"` — heals/shields simply don't separate out yet
 (we never fabricate a heal value).
 
 STATUS: the class is located by the same string→type→instances scan as the
-player; the field OFFSETS below must be calibrated live (PLAN §7). Until then
+player; the field OFFSETS below must be calibrated live. Until then
 `calibrated()` is False and `poll()` returns [] — so the meter cleanly uses the
 HP-diff fallback and never emits fabricated events.
 """
@@ -27,15 +27,15 @@ import sys
 import time
 
 from .hl import Hl, is_ptr, _HOBJ
+from .constants import TO_NAME
 from .proc import Proc, ProcError
 from ..combat.dps import DamageEvent
 
-# --- calibrated live 2026-05-30 (build 13,358,488 B; pid 10380) via HL type
-# reflection (`_re_reflect.py`): read ui.comp.DamageDisplay -> st.skill.DamageResult
-# field offsets straight from the runtime fields_indexes table (names preserved).
-# These are struct field offsets (stable for the build); the type pointer itself
-# is still located dynamically by name in `_find_type`. Re-run `_re_reflect.py`
-# if a patch shifts the layout.
+# --- calibrated live 2026-05-30 (build 13,358,488 B) via HL type reflection:
+# ui.comp.DamageDisplay -> st.skill.DamageResult field offsets read straight from
+# the runtime fields_indexes table (names preserved). These are struct field
+# offsets (stable for the build); the type pointer itself is still located
+# dynamically by name in `_find_type`. Re-validate live if a patch shifts the layout.
 OFF_DISPLAY_RESULT: int | None = 0x498  # DamageDisplay.dmg -> st.skill.DamageResult
 OFF_RESULT_AMOUNT: int | None = 0x50    # DamageResult._amount (f64)
 OFF_RESULT_SKILL: int | None = 0x08     # DamageResult.baseSkill (-> st.skill.BaseSkill)
@@ -45,15 +45,13 @@ OFF_RESULT_TARGET: int | None = 0x28    # DamageResult.target (-> ent.GameObject
 OFF_SKILL_ID: int | None = 0xA0         # BaseSkill.kind (String) — per-skill name
 # No heal/shield discriminator on DamageResult — heals render via a separate
 # display class (a HealDisplay sibling, not yet sourced). Leave kind=damage; never
-# fabricate a heal. (See `_re_reflect.py` / PLAN Phase 0 RE log.)
+# fabricate a heal.
 OFF_RESULT_KIND: int | None = None      # DamageResult.kind enum (i32), or None
 
 # Map the raw DamageResult.kind enum value -> our kind label. Fill this in when
 # OFF_RESULT_KIND is calibrated (take a heal, gain a shield, note the value);
-# any value not in the map degrades to "damage". See `_re_damage.py`.
+# any value not in the map degrades to "damage".
 KIND_MAP: dict[int, str] = {}
-
-TO_NAME = 0x10
 
 # --- cluster-scan tuning ----------------------------------------------------
 # Pad each located instance into a window and merge nearby windows, so the per-
@@ -61,7 +59,7 @@ TO_NAME = 0x10
 # not just the exact addresses that were live during the (slow) discovery scan.
 # HashLink's GC pages are 64 KiB; these are deliberately generous (cluster spread
 # is bounded by how many same-size pages the class occupies) but still tiny next
-# to the ~23 GB heap. Tune from `_re_cluster.py`'s measured spread + scan time.
+# to the ~23 GB heap. Tune from the measured cluster spread + scan time.
 RANGE_PAD = 1 << 18          # 256 KiB each side (coverage comes from accumulated anchors)
 RANGE_MERGE_GAP = 1 << 20    # coalesce instances whose padded windows are <1 MiB apart
 MAX_SCAN_BYTES = 512 << 20   # safety cap: never let derived ranges exceed 512 MiB
@@ -139,7 +137,7 @@ class DamageReader:
         # ~20 AND each transient floating number) lives in the same handful of GC
         # pages. We locate that cluster once (slow full scan), then re-enumerate it
         # each tick by scanning ONLY those ranges (tens of MB, sub-100ms) — fast
-        # enough to catch a number during its ~1s life. See DPS_METER_PLAN.
+        # enough to catch a number during its ~1s life (see core/damage_source.py).
         self._scan_ranges: list[tuple[int, int]] = []
         self._ranges_ready = False
         self._last_count = 0

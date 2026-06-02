@@ -72,9 +72,10 @@ anchors on the game's app singleton: it resolves that type by class name once,
 then follows runtime pointers to the local player object. The singleton is stable
 for the session, so the player is then re-read each frame with no further
 scanning. `PlayerLocator` wraps this and falls back to a pure-read heap scan for
-the player type if the anchor can't be resolved. The locator exposes
-`locate`, `address`, and `read_xyz`; there's also a `CameraLocator` for free-look
-yaw (not in the player struct).
+the player type if the anchor can't be resolved. The locator exposes `locate`,
+`address`, `read_xyz`, and `read_heading` (the minimap rotates by player heading;
+free-look camera yaw isn't in the player struct, so it stays unavailable in the
+pure-read build).
 
 ### `core/scene.py` — the scene snapshot
 From the player pointer, walks to the `GameLayer`, then the unit and element
@@ -97,11 +98,20 @@ aggregator: **HP-diff** (watch enemy health drop over time → team/area total) 
 encounter totals, and per-target/per-skill breakdowns.
 
 ### `core/model.py` — `LiveModel`
-The conductor. Owns the `Proc`, the locator, the `Scene`, and the `DpsMeter`.
-Each tick it produces the data the views need (nearest enemies, nearest chests +
-resolved loot tables, combat sample). It's where the bug-fix invariants live:
-bosses are tracked regardless of distance; chest loot tables are resolved
-deterministically and cached so they don't flicker.
+The conductor. Owns the `Proc`, the locator, the `Scene`, the HP-diff `DpsMeter`,
+and two extracted managers it delegates to:
+- `core/chest_resolver.py` — `ChestResolver`: resolves a chest id to its loot
+  table (cache + boss re-attribution) and merges the static overworld index with
+  the live scene's chests. Pure policy, no memory reads.
+- `core/damage_source.py` — `DamageSourceManager`: the OPT-IN, experimental
+  per-skill `DamageDisplay` reader (its lifecycle, background calibration, poller,
+  and its own event meter). HP-diff stays the always-on fallback.
+
+Each tick `LiveModel` produces the data the views need (nearest enemies, nearest
+chests + resolved loot tables, combat sample). It's where the bug-fix invariants
+live: bosses are tracked regardless of distance; chest loot tables are resolved
+deterministically and cached so they don't flicker. Shared layout offsets live in
+one place, `core/constants.py`, imported by every reader.
 
 ### `data/` — static, process-free
 Everything derived from the game's CastleDB (`.cdb`) tables: the recursive loot
@@ -113,6 +123,23 @@ One design system (`theme.py` + shared widgets in `widgets.py`): dark, flat,
 **sharp corners**, cyan accent. Overlays subclass `overlay_base.py` (frameless,
 translucent, always-on-top, click-through). Every view reads from `LiveModel`.
 
+`control_panel.py` is the main window (nav rail + stacked pages). It stays a thin
+view by delegating two concerns to dedicated `QObject`s it drives via signals:
+- `ui/game_attach.py` — `GameAttachmentController`: the read-only session
+  lifecycle (the `Proc` handle, the `LiveModel`, the locate worker, and the 2 s
+  auto-attach watcher). It holds no UI; it emits `status` / `log` / `locating` /
+  `located_changed` / `model_changed` / `detaching` and the panel reacts.
+- `ui/overlay_manager.py` — `OverlayManager`: the overlay windows + their toggle
+  cards, plus global opacity/lock. The panel exposes `self.proc` / `self.model` /
+  `self.overlays` as properties onto these two, so the page builders are unchanged.
+
+**Boundary:** `ui/` never reads the process directly — no `.read()` / `.u64()` /
+`.find_bytes()` calls; it only consumes `LiveModel`. Importing `Proc` to *attach*
+(the control panel's auto-attach) is fine — that's lifecycle, not a memory read.
+Conversely the headless layers (`core/`, `combat/`, `data/`, `geo/`) import no GUI
+toolkit at module scope; a layering test enforces this (`data/icons.py` is the one
+UI-adjacent data module, and it lazy-imports Qt inside functions).
+
 ## One frame, end to end
 
 Say the DPS overlay wants to show current DPS:
@@ -120,12 +147,12 @@ Say the DPS overlay wants to show current DPS:
 1. A timer in the UI asks `LiveModel.sample_combat()` (rate-limited to ~5 Hz).
 2. `LiveModel` calls `scene.units(player_addr)`:
    - `player.py` already has the player pointer (`player_addr`).
-   - `scene.py` reads `player + 0x58` → `GameLayer`, reads the units array at
-     `GameLayer + 0x128`, then **one `read_many`** of all unit header blocks.
+   - `scene.py` follows the player → `GameLayer` link, then the units array, and
+     does **one `read_many`** of all unit header blocks.
    - For each block it parses type ptr, owner, xyz, unit-id, and asks `hl.py` to
      resolve the class and id strings (cached). Out come `Entity` records.
-3. For each enemy, `attributes.health()` reads `unit + 0x3D0` → attributes →
-   `+ 0xF0` → current HP (f64).
+3. For each enemy, `attributes.health()` follows the unit → attributes block to
+   read current HP (an f64). (The named offsets all live in `core/constants.py`.)
 4. `LiveModel` builds a snapshot of `(addr, unit_id, hp)` and feeds it to
    `DpsMeter.update()`, which diffs HP vs the last tick to derive damage. (If the
    `DamageDisplay` event source is calibrated, it uses that instead for per-skill

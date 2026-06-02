@@ -103,6 +103,27 @@ def test_autostart_does_not_fire_on_load_jitter_alone():
     assert fired is False
 
 
+def test_autostart_ignores_teleport_in_landing_drift():
+    # Real trace: after the teleport into a dungeon the player spawns above the
+    # floor and SETTLES DOWN ~2.2 units in Z over ~1s (X/Y fixed). Each tick of
+    # that drop is a tiny step that the old per-tick test mistook for 'still', so
+    # it baselined mid-fall and the remaining settle tripped the move threshold —
+    # a false start with no real input.
+    a = AutoStarter()
+    a.feed(True, (2078.0, 162.0, -292.0))        # out in the world
+    a.feed(True, (-98.8, 347.8, 17.4))           # teleport into the dungeon (>50)
+    z = 17.4
+    fired = False
+    for _ in range(26):                          # the landing drop (~0.085/tick)
+        z -= 0.085
+        fired = fired or a.feed(True, (-98.8, 347.8, z))
+    assert fired is False                        # must NOT auto-start during the landing
+    # genuinely at rest now → settle, then a deliberate walk starts it
+    for _ in range(AutoStarter.SETTLE_TICKS + 5):
+        a.feed(True, (-98.8, 347.8, z))
+    assert a.feed(True, (-95.0, 347.8, z)) is True
+
+
 def test_autostart_disarms_when_leaving_dungeon():
     a = AutoStarter()
     _settle(a, (10.0, 10.0, 0.0))

@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import struct
 
-from .hl import Hl, is_ptr, _HOBJ
+from .hl import Hl, is_ptr, utf16z as _utf16z
+from .constants import TO_NAME, TO_SUPER, TO_GLOBALVAL
 from .proc import Proc, ProcError
 
 # Anchor class names.
@@ -39,17 +40,8 @@ CLS_HERO = "ent.Hero"
 CLS_PLAYER = "st.Player"
 CLS_LAYER = "st.GameLayer"
 
-# hl_type_obj field offsets (HL 64-bit; validated this build).
-TO_NAME = 0x10
-TO_SUPER = 0x18
-TO_GLOBALVAL = 0x38
-
 # How far into an object to look for the pointer fields we resolve by class.
 _FIELD_SCAN_BYTES = 0x400
-
-
-def _utf16z(s: str) -> bytes:
-    return s.encode("utf-16-le") + b"\x00\x00"
 
 
 class GameAppLocator:
@@ -57,7 +49,8 @@ class GameAppLocator:
         self.proc = proc
         self.hl = hl or Hl(proc)
         self._gameapp_obj: int | None = None   # GameApp hl_type_obj
-        self._addr: int | None = None          # GameApp singleton instance
+        self._static_obj: int | None = None    # $App static object (globals_data slot)
+        self._addr: int | None = None          # GameApp singleton instance (re-read live)
         self.off_inst: int | None = None       # $App static obj -> inst
         self.off_hero: int | None = None
         self.off_me: int | None = None
@@ -177,8 +170,12 @@ class GameAppLocator:
         hero = self._u64(singleton + fields["hero"])
         if not is_ptr(hero) or self.hl.class_of(hero) != CLS_HERO:
             return None
-        # commit
+        # commit. `static_obj` is a globals_data slot (stable for the process), so
+        # cache it: re-reading `static_obj + off_inst` each frame yields the CURRENT
+        # singleton, which the game RECREATES on a world reload — so caching the
+        # singleton itself would go stale, but the static slot does not.
         self._gameapp_obj = gameapp_obj
+        self._static_obj = static_obj
         self.off_inst = off_inst
         self.off_hero = fields.get("hero")
         self.off_me = fields.get("me")
@@ -207,11 +204,36 @@ class GameAppLocator:
         return None
 
     # --- reads (pure field follow, no scan) ------------------------------
+    @property
+    def anchored(self) -> bool:
+        """True once the stable `$App` static slot + the inst/hero offsets are
+        resolved — i.e. we can re-resolve the current singleton on demand without
+        a scan."""
+        return (self._static_obj is not None and self.off_inst is not None
+                and self.off_hero is not None)
+
     def hero(self) -> int | None:
-        if self._addr is None or self.off_hero is None:
+        if not self.anchored:
             if self.locate() is None:
                 return None
-        return self.hl.ptr(self._addr + self.off_hero)
+        return self.live_hero()
+
+    def live_hero(self) -> int | None:
+        """Live `GameApp.hero`, re-resolved through the STABLE `$App.inst` slot
+        with NO scan. Re-reading `$App.inst` each call follows a singleton the
+        game RECREATES on a world reload (caching the singleton would go stale);
+        re-reading `.hero` follows a character change. Returns None when not yet
+        anchored, or when there's no live hero right now (main menu / loading) —
+        either because the singleton or the hero field is currently null."""
+        if not self.anchored:
+            return None
+        singleton = self._u64(self._static_obj + self.off_inst)
+        if not is_ptr(singleton) or self.hl.class_of(singleton) != CLS_GAMEAPP:
+            self._addr = None
+            return None
+        self._addr = singleton                      # refresh cache for me()/layer()
+        hero = self._u64(singleton + self.off_hero)
+        return hero if is_ptr(hero) else None
 
     def me(self) -> int | None:
         if self._addr is None or self.off_me is None:

@@ -27,17 +27,10 @@ from dataclasses import dataclass
 
 from .hl import Hl, is_ptr
 from .proc import Proc
-
-OFF_GAMELAYER = 0x58
-OFF_UNITS_ARR = 0x128
-OFF_ELEMS_ARR = 0x120
-OFF_OWNER = 0x60
-OFF_POS = 0x98
-OFF_UNITID = 0x250
-OFF_ELEMID = 0x268
-OFF_ELEMSTATE = 0x290
-
-UNIT_BLOCK = 0x258      # covers type(0) .. unit-id(0x250)
+from .constants import (   # offsets live in one place; re-exported for callers
+    OFF_GAMELAYER, OFF_UNITS_ARR, OFF_ELEMS_ARR, OFF_OWNER, OFF_POS,
+    OFF_UNITID, OFF_ELEMID, OFF_ELEMSTATE, UNIT_BLOCK,
+)
 
 _ELEM_KINDS = {
     "ent.interactible.Gatherable": "gatherable",

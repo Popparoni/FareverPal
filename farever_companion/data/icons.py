@@ -4,6 +4,13 @@ Resolves item/unit/skill ids to the extracted PNGs under
 htdocs/assets/icons/<sheet>/<id>.png (the same set the web wiki uses). Scaled
 smoothly and cached by (sheet, id, size). Missing icons fall back to a small
 flat placeholder so the UI never breaks on a gap.
+
+LAYERING NOTE: this is a deliberately UI-adjacent data module — it renders
+QPixmaps, so it is the one `data/` module that touches Qt. To keep the headless
+layering contract intact (data/ must import without a GUI toolkit installed), Qt
+is imported LAZILY inside `_qt()`, never at module scope. The layering guard in
+tests/test_readonly_default.py allows exactly this (it forbids module-level Qt
+imports, not in-function ones). Keep all Qt use inside functions here.
 """
 from __future__ import annotations
 

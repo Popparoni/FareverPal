@@ -138,8 +138,17 @@ class AutoStarter:
     run, every time.
     """
 
-    SETTLE_EPS = 0.6        # per-tick move under this == "standing still"
-    SETTLE_TICKS = 3        # consecutive still ticks before the baseline is trusted
+    # "Standing still" = staying within SETTLE_EPS of where the still-streak began
+    # for SETTLE_TICKS consecutive ticks. Measuring against the streak ANCHOR (not
+    # the per-tick step) is what rejects the teleport-in LANDING: when you arrive
+    # you spawn slightly above the floor and settle down a couple of units over
+    # ~1s. Each tick of that drop is a tiny step (well under any per-tick epsilon),
+    # so the old per-tick test counted the fall as 'still', baselined mid-fall, and
+    # then the remaining settle crossed the move threshold — a false start with no
+    # real input. Anchored distance grows as the fall continues, so it never
+    # settles until the landing actually stops. (Trace: X/Y fixed, Z 17.4->15.2.)
+    SETTLE_EPS = 0.6        # radius (from the streak anchor) that still counts as "still"
+    SETTLE_TICKS = 10       # ~0.5s held inside that radius before the baseline is trusted
     MOVE_THRESHOLD = 2.0    # distance from the baseline that counts as "the run began"
     TELEPORT_STEP = 50.0    # a single-tick jump bigger than this == load/teleport, not walking
 
@@ -149,11 +158,18 @@ class AutoStarter:
     def reset(self) -> None:
         self._base = None       # settled spawn position (baseline) once trusted
         self._last = None       # previous tick position
-        self._settle = 0        # consecutive "standing still" ticks
+        self._anchor = None     # position where the current still-streak began
+        self._settle = 0        # consecutive ticks held within SETTLE_EPS of the anchor
 
     @staticmethod
     def _dist(a, b) -> float:
-        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
+        # HORIZONTAL (ground-plane x,y) distance only — deliberately ignore the
+        # vertical axis. The teleport-in LANDING settles the player downward by a
+        # couple of units in the 3rd coord while x,y stay fixed (observed:
+        # (-98.8,347.8,17.4)->(-98.8,347.8,15.2)); counting that as movement was
+        # the false auto-start. The minimap's world->map transform confirms x,y are
+        # the ground plane and the 3rd coord is height. Real walking moves x,y.
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
     def feed(self, in_dungeon: bool, pos) -> bool:
         """Return True on the tick a real run-start movement is detected."""
@@ -163,6 +179,7 @@ class AutoStarter:
             return False
         if self._last is None:
             self._last = pos
+            self._anchor = pos
             self._settle = 0
             return False
         step = self._dist(pos, self._last)
@@ -171,16 +188,22 @@ class AutoStarter:
         # throw away any tentative baseline and wait for things to settle.
         if step > self.TELEPORT_STEP:
             self._base = None
+            self._anchor = pos
             self._settle = 0
             return False
         if self._base is None:
-            # Only trust a baseline once the player has held still for a few
-            # ticks — that's the real resting spawn point, free of load jitter.
-            if step < self.SETTLE_EPS:
+            # Trust the baseline only once the player has genuinely come to rest:
+            # held within SETTLE_EPS of the streak anchor for SETTLE_TICKS. A slow
+            # drift (the landing) walks out of that radius and re-anchors, so it
+            # never settles until the motion truly stops.
+            if self._anchor is None:
+                self._anchor = pos
+            if self._dist(pos, self._anchor) < self.SETTLE_EPS:
                 self._settle += 1
                 if self._settle >= self.SETTLE_TICKS:
                     self._base = pos
             else:
+                self._anchor = pos      # drifted out → restart the streak here
                 self._settle = 0
             return False
         # Baseline established → deliberate movement away from it starts the run.

@@ -5,7 +5,7 @@ project:
     - CDB sheets        D:\\Projects\\FareverFandom\\data\\sheets\\*.json
     - wiki data layer   ...\\htdocs\\assets\\data\\{items,enemies}.json
     - icons             ...\\htdocs\\assets\\icons\\{item,unit,skill,_shared}\\
-    - chest index       ...\\tools\\farever_qa\\notes\\chest_loot_index.json
+    - chest index       <workspace>\\notes\\chest_loot_index.json (see notes_dir)
 
 In a PyInstaller one-file build these are copied next to the bundle; we check
 the frozen `_MEIPASS` dir first, then fall back to walking up to the repo root.
@@ -67,7 +67,7 @@ def chest_positions_path() -> Path:
 def project_root() -> Path:
     """This project's own root (companion/), for caches and config defaults."""
     for parent in Path(__file__).resolve().parents:
-        if (parent / "PLAN.md").exists() and parent.name == "companion":
+        if parent.name == "companion" and (parent / "run.py").exists():
             return parent
     return Path(__file__).resolve().parent.parent
 

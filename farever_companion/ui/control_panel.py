@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime
 import threading
-import time
 import webbrowser
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -18,16 +17,11 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import theme
 from . import components as C
 from .widgets import fmt_pct
-from .entity_overlay import EntityOverlay
-from .dps_overlay import DpsOverlay
-from .skill_overlay import SkillOverlay
-from .minimap import MinimapOverlay
-from .speedrun_overlay import SpeedrunOverlay
-from .crosshair import CrosshairOverlay, CrosshairCanvas
+from .crosshair import CrosshairCanvas
+from .overlay_manager import OverlayManager
+from .game_attach import GameAttachmentController
 from ..config import Settings
-from ..core.proc import Proc, ProcError, backend_name, find_pid
-from ..core.model import LiveModel
-from ..core.autoattach import AutoAttach, Act
+from ..core.proc import backend_name
 from ..core import updater
 from ..data import loot, names, tokens
 from ..data import icons
@@ -48,23 +42,6 @@ NAV = [
     ("log", "terminal", "Log"),
 ]
 CLASSES = ["Auto", "Warrior", "Rogue", "Mage", "Priest", "Off"]
-# the game HUD overlays that share the global opacity + lock (crosshair has its
-# own opacity/click-through). Keep this in one place so new overlays inherit both.
-HUD_OVERLAYS = ("entity", "dps", "skills", "map", "speedrun")
-
-
-class _LocateWorker(QtCore.QThread):
-    done = QtCore.Signal(object)   # address, None, or Exception
-
-    def __init__(self, model: LiveModel):
-        super().__init__()
-        self.model = model
-
-    def run(self):
-        try:
-            self.done.emit(self.model.locate_player())
-        except Exception as e:
-            self.done.emit(e)
 
 
 class _LoginWorker(QtCore.QThread):
@@ -356,18 +333,17 @@ class ControlPanel(QtWidgets.QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
         self.s = settings
-        self.proc: Proc | None = None
-        self.model: LiveModel | None = None
-        # key -> overlay widget (or None). 'crosshair' lives here too.
-        self.overlays: dict[str, QtWidgets.QWidget | None] = {}
-        # key -> [cards/toggles that mirror that overlay's open state]
-        self._overlay_cards: dict[str, list] = {}
-        self._worker: _LocateWorker | None = None
-        # locate-progress feedback (the pure-read scan can take a while)
-        self._locate_t0: float | None = None
-        self._locate_timer = QtCore.QTimer(self)
-        self._locate_timer.setInterval(500)
-        self._locate_timer.timeout.connect(self._tick_locate)
+        # The live game session (Proc handle + LiveModel + locate / auto-attach)
+        # is owned by a controller; `self.proc` / `self.model` below delegate to
+        # it. Created before the UI builds so the page builders can read the
+        # (initially None) model via the property.
+        self.attach_ctl = GameAttachmentController(settings, self)
+        # The overlay windows + their toggle-cards live in a dedicated manager;
+        # `self.overlays` / `self._overlay_cards` below delegate to it so the page
+        # code and minimap setters keep their existing access.
+        self.overlay_mgr = OverlayManager(settings, self)
+        self.overlay_mgr.log.connect(self.log)
+        self.overlay_mgr.request_config.connect(self._raise_self)
         self._nav_items: dict[str, C.NavItem] = {}
         # friends + presence
         self._friends: list = []
@@ -401,18 +377,18 @@ class ControlPanel(QtWidgets.QMainWindow):
         self._friends_timer.timeout.connect(self._friends_poll)
         self._refresh_friends_gating()
 
-        # Auto-attach watcher: a cheap 2 s poll that attaches when Farever opens,
-        # keeps trying to locate the player until they're in-world, and detaches
-        # when the game closes — all via the existing manual paths (read-only).
-        self._auto = AutoAttach()
-        self._attach_busy = False
-        self._located_shown = False        # has the UI applied the 'located' transition?
-        self._attach_cooldown = 0          # ticks to skip after an auto-attach failure
-        self._attach_timer = QtCore.QTimer(self)
-        self._attach_timer.setInterval(2000)
-        self._attach_timer.timeout.connect(self._attach_tick)
-        self._attach_timer.start()
-        self._refresh_attach_status()
+        # Auto-attach watcher (in the controller): a cheap 2 s poll that attaches
+        # when Farever opens, keeps trying to locate the player until they're
+        # in-world, and detaches when the game closes — all read-only. The panel
+        # is a view: it just reacts to the controller's signals.
+        self.attach_ctl.log.connect(self.log)
+        self.attach_ctl.status.connect(self._set_status)
+        self.attach_ctl.locating.connect(self._set_locating)
+        self.attach_ctl.located_changed.connect(self._set_overlay_cards_enabled)
+        self.attach_ctl.model_changed.connect(self._on_model_changed)
+        self.attach_ctl.detaching.connect(self._on_detaching)
+        self.attach_ctl.goto_log.connect(lambda: self._select_nav("log"))
+        self.attach_ctl.start()
 
         # Self-update: clear any leftover *.old from a prior update, then check
         # GitHub Releases (via the website) for a newer exe — off the UI thread.
@@ -429,6 +405,38 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.log(f"Read-only. Memory backend: {backend_name()}. Press Attach "
                  "(if another memory tool is running, unload it first to avoid "
                  "interference). The crosshair needs no attach.")
+
+    # The live session is owned by `self.attach_ctl`; the overlay windows + cards
+    # by `self.overlay_mgr`. These properties keep the existing `self.proc` /
+    # `self.model` / `self.overlays` / `self._overlay_cards` access working
+    # unchanged across the page builders, status log, and minimap setters.
+    @property
+    def proc(self):
+        return self.attach_ctl.proc
+
+    @property
+    def model(self):
+        return self.attach_ctl.model
+
+    @property
+    def overlays(self) -> dict:
+        return self.overlay_mgr.overlays
+
+    @property
+    def _overlay_cards(self) -> dict:
+        return self.overlay_mgr.cards
+
+    # --- controller signal handlers (the panel is a view) ----------------
+    def _set_locating(self, on: bool):
+        self._locate_bar.setVisible(on)
+
+    def _on_model_changed(self, model):
+        self.overlay_mgr.model = model
+
+    def _on_detaching(self):
+        # The controller is about to stop the model's threads; close overlays
+        # first (they read the model).
+        self.overlay_mgr.close_all()
 
     def _brand_pixmap(self, size: int) -> QtGui.QPixmap:
         """The moustache brand mark for the header, tinted to the current accent on
@@ -753,7 +761,7 @@ class ControlPanel(QtWidgets.QMainWindow):
     #  Pages
     # ====================================================================
     def _register_card(self, key: str, card):
-        self._overlay_cards.setdefault(key, []).append(card)
+        self.overlay_mgr.register_card(key, card)
 
     def _page_container(self, title: str | None = None):
         page = QtWidgets.QWidget()
@@ -954,11 +962,7 @@ class ControlPanel(QtWidgets.QMainWindow):
             ov.set_columns(keys)
 
     def _set_overlay_cards_enabled(self, on: bool):
-        """Overlay cards that need a live process (entity/dps/skills/map) are gated
-        until attach+locate succeeds. Crosshair stays available (cosmetic)."""
-        for key in ("entity", "dps", "skills", "map"):
-            for card in self._overlay_cards.get(key, []):
-                card.setEnabled(on)
+        self.overlay_mgr.set_cards_enabled(on)
 
     # ---- Combat / DPS ---------------------------------------------------
     def _page_combat(self):
@@ -1783,9 +1787,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         if app is not None:
             app.setStyleSheet(theme.QSS)        # control panel + inheriting overlays
         self._restyle_accent()                  # painted/captured-color widgets
-        for ov in self.overlays.values():
-            if ov is not None and hasattr(ov, "apply_accent"):
-                ov.apply_accent(color)
+        self.overlay_mgr.apply_accent(color)
         self._sync_accent_to_account()          # keep the web account's accent in sync
 
     def _restyle_accent(self):
@@ -1809,12 +1811,7 @@ class ControlPanel(QtWidgets.QMainWindow):
             w.update()                          # repaint live painters (toggles, etc.)
 
     def _set_opacity(self, v):
-        self.s.opacity = v / 100.0
-        self.s.save()
-        for key in HUD_OVERLAYS:
-            ov = self.overlays.get(key)
-            if ov and ov.isVisible():
-                ov.set_opacity(self.s.opacity)   # forwards to child windows (drop table)
+        self.overlay_mgr.set_opacity(v)
 
     def _set_crosshair(self, attr, value):
         setattr(self.s, attr, value)
@@ -1826,14 +1823,7 @@ class ControlPanel(QtWidgets.QMainWindow):
             ov.apply_settings()
 
     def _set_lock(self, on):
-        self.s.lock_overlays = on
-        self.s.save()
-        for key in HUD_OVERLAYS:
-            ov = self.overlays.get(key)
-            if ov is not None and hasattr(ov, "set_locked"):
-                ov.set_locked(on)
-        self.log("Overlays LOCKED (click-through)." if on
-                 else "Overlays unlocked (interactive).")
+        self.overlay_mgr.set_lock(on)
 
     def _set_minimap_shape(self, shape):
         self._set("minimap_shape", shape)
@@ -1889,149 +1879,6 @@ class ControlPanel(QtWidgets.QMainWindow):
         self.status.setText(f"●  {text}")
         self.status.setStyleSheet(
             f"color:{dot};font-family:'{theme.MONO_FONT}','Consolas';font-size:11px;")
-
-    # --- locate progress feedback ---------------------------------------
-    def _start_locate(self):
-        """Show the busy bar + start the elapsed-time counter for a locate scan."""
-        if self._locate_t0 is None:
-            self._locate_t0 = time.monotonic()
-        self._locate_bar.setVisible(True)
-        if not self._locate_timer.isActive():
-            self._locate_timer.start()
-        self._tick_locate()
-
-    def _stop_locate(self):
-        """Hide the busy bar + stop the counter (locate finished or detached)."""
-        self._locate_t0 = None
-        self._locate_timer.stop()
-        self._locate_bar.setVisible(False)
-
-    def _tick_locate(self):
-        if self._locate_t0 is None or self.proc is None:
-            return
-        el = time.monotonic() - self._locate_t0
-        self._set_status(True, f"attached PID {self.proc.pid} · locating player… ({el:.0f}s)")
-
-    def attach(self, auto: bool = False):
-        self._attach_busy = True
-        try:
-            self.proc = Proc.attach()
-        except ProcError as e:
-            self.proc = None
-            self._attach_busy = False
-            if auto:
-                # Don't yank the user to the Log tab or spam: one line, then back
-                # off a few ticks (e.g. another memory tool conflicting).
-                self._attach_cooldown = 5
-                self.log(f"Auto-attach deferred: {e} (retrying shortly).")
-                self._refresh_attach_status()
-            else:
-                self.log(f"ATTACH FAILED: {e}")
-                self._select_nav("log")
-            return
-        self.model = LiveModel(self.proc)
-        self._located_fail_logged = False
-        self._set_status(True, f"attached PID {self.proc.pid} · locating player…")
-        self._start_locate()
-        self.log(f"Attached PID {self.proc.pid}. {len(self.model.chests)} chests. "
-                 "Locating the player by scanning memory (read-only)…")
-        self._worker = _LocateWorker(self.model)
-        self._worker.done.connect(self._on_located)
-        self._worker.start()
-
-    def _on_located(self, result):
-        self._attach_busy = False
-        if isinstance(result, Exception):
-            self._stop_locate()
-            self.log(f"Locate failed: {result}")
-            self._set_status(True, "attached · player NOT found")
-            return
-        if not result:
-            # The watcher's RELOCATE retries each tick until the player loads in;
-            # log once so menu time doesn't fill the log. The slow scan is done
-            # (type is cached now), so hide the busy bar; retries are cheap.
-            self._stop_locate()
-            if not getattr(self, "_located_fail_logged", False):
-                self.log("Player not found. Be fully loaded in-world (auto-retrying).")
-                self._located_fail_logged = True
-            self._set_status(True, "attached · waiting for world")
-            return
-        self._stop_locate()
-        self._located_shown = True
-        self._set_status(True, f"attached PID {self.proc.pid} · player @ {result:#x}")
-        self._set_overlay_cards_enabled(True)
-        self.log(f"Player located @ {result:#x}. Overlays unlocked.")
-
-    # --- auto-attach watcher --------------------------------------------
-    def _attach_tick(self):
-        """2 s poll: attach/locate/detach with the game, via the manual paths."""
-        if backend_name() == "none":
-            return
-        if self._attach_cooldown > 0:
-            self._attach_cooldown -= 1
-            return
-        try:
-            pid = find_pid()
-        except Exception:
-            return
-        act = self._auto.decide(
-            enabled=self.s.auto_attach,
-            running_pid=pid,
-            attached_pid=(self.proc.pid if self.proc else None),
-            located=bool(self.model and self.model.player_addr is not None),
-            busy=self._attach_busy,
-        )
-        if act is Act.ATTACH:
-            self.attach(auto=True)
-        elif act is Act.DETACH:
-            self._auto_detach()
-        elif act is Act.RELOCATE:
-            self._relocate()
-        if act is Act.NONE:
-            self._refresh_attach_status()
-        # `player_addr` can become set between locate workers, right as decide()
-        # flips to NONE (it stops issuing RELOCATE once located). The
-        # 'located' UI transition normally only fires from a worker's _on_located,
-        # so without this reconciliation the top bar can stay stuck at "waiting for
-        # world" while the player IS in fact located. Apply the transition once.
-        if self.proc is not None and not self._attach_busy:
-            pa = self.model.player_addr if self.model else None
-            if pa is not None and not self._located_shown:
-                self._on_located(pa)
-            elif pa is None and self._located_shown:
-                self._located_shown = False
-                self._set_overlay_cards_enabled(False)
-
-    def _relocate(self):
-        """Quietly re-run the locate worker (attached but not yet in-world)."""
-        if self.model is None or self._attach_busy:
-            return
-        if self._worker is not None and self._worker.isRunning():
-            return
-        self._attach_busy = True
-        self._worker = _LocateWorker(self.model)
-        self._worker.done.connect(self._on_located)
-        self._worker.start()
-
-    def _auto_detach(self):
-        """Detach because the game closed/restarted; the watcher re-attaches
-        automatically when it relaunches."""
-        self.detach()
-        self.log("Game closed — detached. Watching for Farever…")
-        self._refresh_attach_status()
-
-    def _refresh_attach_status(self):
-        """When detached, reflect the watcher state in the top-bar status line.
-
-        Auto-attach is always on (no UI toggle); `auto_attach` survives as a
-        hidden settings.json escape hatch — if a user sets it false there, the
-        watcher stops attaching and we just read "detached"."""
-        if self.proc is not None:
-            return
-        if self.s.auto_attach and backend_name() != "none":
-            self._set_status(False, "watching for Farever…")
-        else:
-            self._set_status(False, "detached")
 
     # --- self-update ----------------------------------------------------
     def _on_update_found(self, info):
@@ -2104,75 +1951,18 @@ class ControlPanel(QtWidgets.QMainWindow):
             return
         QtWidgets.QApplication.quit()
 
-    def _make_overlay(self, key: str):
-        if key == "crosshair":
-            return CrosshairOverlay(self.s)
-        cls = {"entity": EntityOverlay, "dps": DpsOverlay, "skills": SkillOverlay,
-               "map": MinimapOverlay, "speedrun": SpeedrunOverlay}[key]
-        ov = cls(self.model, self.s)
-        if hasattr(ov, "request_config"):
-            ov.request_config.connect(self._raise_self)
-        return ov
-
     def _raise_self(self):
         self.showNormal()
         self.raise_()
         self.activateWindow()
 
     def _request_overlay(self, key: str, on: bool):
-        if not on:
-            ov = self.overlays.get(key)
-            if ov is not None:
-                ov.close()      # WA_DeleteOnClose -> _on_overlay_closed
-            return
-        if key != "crosshair" and (self.model is None or self.model.player_addr is None):
-            self.log("Attach and locate the player first.")
-            self._sync_cards(key)   # revert the toggle
-            return
-        ov = self.overlays.get(key)
-        if ov is not None and ov.isVisible():
-            return
-        ov = self._make_overlay(key)
-        ov.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
-        ov.destroyed.connect(lambda *_: self._on_overlay_closed(key))
-        ov.show()
-        if self.s.lock_overlays and hasattr(ov, "set_locked"):
-            ov.set_locked(True)
-        self.overlays[key] = ov
-        self._sync_cards(key)
-        self.log(f"Opened {key} overlay.")
-
-    def _on_overlay_closed(self, key: str):
-        self.overlays[key] = None
-        self._sync_cards(key)
-
-    def _sync_cards(self, key: str):
-        ov = self.overlays.get(key)
-        visible = bool(ov is not None and ov.isVisible())
-        for card in self._overlay_cards.get(key, []):
-            card.set_checked_silent(visible)
+        self.overlay_mgr.request(key, on)
 
     def detach(self):
-        """Tear down the live session (overlays, handle). Called only by the
-        watcher (game closed) and on app close — there is no manual detach."""
-        self._attach_busy = False
-        self._located_shown = False
-        self._stop_locate()
-        for key, ov in list(self.overlays.items()):
-            if ov is not None:
-                ov.close()
-            self.overlays[key] = None
-        if self.model is not None:
-            try:
-                self.model.shutdown()      # stop background threads before detaching
-            except Exception as e:
-                self.log(f"shutdown warning: {e}")
-        if self.proc:
-            self.proc.close()
-        self.proc = None
-        self.model = None
-        self._set_overlay_cards_enabled(False)
-        self._set_status(False, "detached")    # caller refreshes the watch line
+        """Tear down the live session. The controller closes overlays (via its
+        `detaching` signal) before stopping the model + closing the handle."""
+        self.attach_ctl.detach()
 
     # ====================================================================
     #  Loot prediction
@@ -2236,7 +2026,7 @@ class ControlPanel(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
-            self._attach_timer.stop()
+            self.attach_ctl.stop()
         except Exception:
             pass
         try:

@@ -25,6 +25,7 @@ so it runs headless in CI with no live game, no Qt widget, and no native build.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import pathlib
 
@@ -114,3 +115,52 @@ def test_no_write_primitive_in_native(token):
     assert not offenders, (
         f"forbidden Win32 write API {token!r} found in native source: {offenders}. "
         "The Rust reader opens the process read-only and must expose no write path.")
+
+
+# --- (g) layering guard: the data/logic layers import no GUI toolkit -------
+# core/, combat/, data/ and geo/ are the headless, unit-testable layers. They
+# must stay importable with no Qt installed, so a Qt import at MODULE LEVEL in
+# any of them is a boundary violation. (data/icons.py is UI-adjacent and may
+# render pixmaps, but it lazy-imports Qt *inside functions* so the module still
+# imports headless — that in-function import is the sanctioned exception, which
+# this module-level check allows.)
+HEADLESS_LAYERS = ("core", "combat", "data", "geo")
+_QT_PKGS = ("PySide6", "PyQt5", "PyQt6", "PySide2")
+
+
+def _module_level_imports(tree: ast.Module):
+    """Yield Import/ImportFrom nodes that run at import time — i.e. at module
+    scope, including inside top-level if/try/with — but NOT those nested inside a
+    function or class body (a deferred/lazy import)."""
+    def walk(body):
+        for node in body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                yield node
+            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                yield from walk(node.body)
+                yield from walk(getattr(node, "orelse", []))
+                yield from walk(getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    yield from walk(handler.body)
+            # deliberately do not descend into FunctionDef/AsyncFunctionDef/ClassDef
+    yield from walk(tree.body)
+
+
+def _layer_py_files():
+    for layer in HEADLESS_LAYERS:
+        yield from (PKG_DIR / layer).rglob("*.py")
+
+
+def test_headless_layers_have_no_module_level_qt_import():
+    offenders = []
+    for path in _layer_py_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in _module_level_imports(tree):
+            mods = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                    else [node.module or ""])
+            if any(m.split(".")[0] in _QT_PKGS for m in mods):
+                offenders.append(f"{path.relative_to(PKG_DIR)}:{node.lineno}")
+    assert not offenders, (
+        f"GUI toolkit imported at module level in a headless layer: {offenders}. "
+        "core/combat/data/geo must import without Qt; defer any Qt use into a "
+        "function (see data/icons.py) or move it to ui/.")

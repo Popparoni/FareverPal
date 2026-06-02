@@ -20,7 +20,7 @@ def experimental_enabled() -> bool:
     shipped to normal users. The exact features (headline DPS, by-enemy, the
     survivability strip) are unaffected and always on. All the per-skill code stays
     in-tree — set FAREVER_EXPERIMENTAL=1 to expose it (e.g. for dev / once the GC
-    page-walk makes it accurate + fast). See DPS_METER_PLAN.md.
+    page-walk makes it accurate + fast). See core/damage_source.py.
     """
     return os.environ.get("FAREVER_EXPERIMENTAL", "").strip().lower() not in (
         "", "0", "false", "no", "off")
@@ -79,8 +79,8 @@ class Settings:
     # personal-best parse per boss unit_id -> {"dps": float, "hps": float}
     dps_best: dict = field(default_factory=dict)
     # live per-skill breakdown via the DamageDisplay cluster scan (see
-    # DPS_METER_PLAN). Default OFF until validated live; flip on once `_re_cluster.py`
-    # confirms fast scans + correct numbers. HP-diff stays the fallback regardless.
+    # core/damage_source.py). Default OFF until validated live; HP-diff stays the
+    # fallback regardless.
     dps_per_skill: bool = False
     # minimap
     minimap_zoom: float = 14.0

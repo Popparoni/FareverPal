@@ -3,8 +3,8 @@
 Top-down radar centred on the player: chests, gatherables, enemies and obelisks
 plotted from the shared LiveModel + the static chest index. Zoomable; POIs
 beyond the view clamp to the edge ring as direction markers. Right-click a POI
-to mark it done (persists). Heading arrow is north-up until a heading field is
-calibrated (PLAN §7)."""
+to mark it done (persists). The heading arrow rotates by the player heading read
+in `core/player.py` (camera yaw isn't available in the pure-read build)."""
 from __future__ import annotations
 
 import math

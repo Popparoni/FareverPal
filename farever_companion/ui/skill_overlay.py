@@ -94,7 +94,7 @@ class SkillOverlay(OverlayWindow):
         # under heavy multi-hit / status-effect load (measured ~30% of live numbers
         # at peak). The headline DPS + by-enemy view are exact (HP-diff); this
         # per-skill table is a representative SAMPLE. Marked experimental until the
-        # GC page-walk lands complete enumeration (see DPS_METER_PLAN.md).
+        # GC page-walk lands complete enumeration (see core/damage_source.py).
         self._exp = QtWidgets.QLabel(
             "experimental — per-skill capture samples the live damage numbers and "
             "can undercount during intense fights; the DPS total and by-enemy view "

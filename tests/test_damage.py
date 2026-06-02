@@ -2,8 +2,8 @@
 
 These cover the logic that turns located DamageDisplay instance addresses into
 the small set of memory ranges `poll()` scans each tick — the fix for the live-
-enumeration wall (see DPS_METER_PLAN). The live scan itself needs the game; here
-we lock down the pure address math.
+enumeration wall (see core/damage_source.py). The live scan itself needs the
+game; here we lock down the pure address math.
 """
 from farever_companion.core.damage import (
     cluster_ranges, clip_ranges, RANGE_PAD, RANGE_MERGE_GAP,
