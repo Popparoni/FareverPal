@@ -76,8 +76,8 @@ your clone doesn't include that data:
 - The **offline loot predictor** and icons need the sheet/icon files present; if
   they're absent the app degrades (placeholder icons, empty predictions) rather
   than crashing.
-- Ask a maintainer how to obtain or point at the extracted data if you need the
-  full app locally. Don't commit large extracted game assets to the repo.
+- Point the app at your own local copy of that data if you need the full app
+  locally. Don't commit large game assets to the repo.
 
 ## Where things live
 

@@ -1,8 +1,7 @@
 # release.ps1 - create the GitHub repo + tagged release for Farever Pal.
 #
-# PREREQUISITE: you must be authenticated with the GitHub CLI first:
+# PREREQUISITE: authenticate the GitHub CLI first:
 #     gh auth login
-# (the agent could not run this for you because it is interactive).
 #
 # Run this script from the companion\ directory:
 #     powershell -ExecutionPolicy Bypass -File release.ps1
@@ -81,7 +80,7 @@ if (-not $hasOrigin) {
 $notes = @"
 Farever Pal $tag
 
-A read-only, out-of-process live companion + QA overlay for Farever
+A read-only, out-of-process live companion overlay for Farever
 (entity/loot overlay, DPS meter, minimap, offline loot predictor).
 
 Download ``FareverPal.exe`` below and run it. Self-contained, no install.

@@ -1,6 +1,6 @@
 # Farever Pal
 
-A **read-only**, **out-of-process** live companion + QA tool for Farever
+A **read-only**, **out-of-process** live companion tool for Farever
 (Heaps / HashLink). It attaches to the running game and locates your character
 purely by **reading** memory — no writes, no code injection, no network — and
 shows:
@@ -47,9 +47,8 @@ freeze, or alter the game.
 - **DPS** comes from watching enemy health fall over time, plus the game's own
   on-screen damage numbers for the per-skill breakdown. Self only.
 
-This overview deliberately leaves out the low-level specifics (exact offsets,
-pointer chains, scan signatures). The tool exists to *read* derived, public-facing
-information for a fan wiki and personal QA — not to hand out a recipe for tampering.
+The tool *reads* derived, public-facing information for a fan wiki and personal
+use.
 
 ## Layout
 
