@@ -24,7 +24,7 @@ FAST_MS = 33      # position/heading repaint (cheap) -> smooth pan + rotation
 MAP_SCALE = 0.89
 MAP_OFF_X = 0.89 * 1724                       # 1534.36
 MAP_OFF_Y = 5120 - (0.89 * 4096 - 1595)       # 3069.56
-# camera-yaw → rotation calibration (tune live: sign flips orbit direction,
+# camera-yaw -> rotation calibration (tune live: sign flips orbit direction,
 # offset aligns "up" with the camera's forward)
 CAM_YAW_SIGN = 1.0
 CAM_YAW_OFFSET = 0.0
@@ -146,7 +146,7 @@ class _Canvas(QtWidgets.QWidget):
         p.setBrush(QtGui.QColor(theme.PANEL))
         p.setPen(QtGui.QColor(theme.BORDER))
         # clip with a QPainterPath (transform-aware, so the rotated map texture
-        # below is clipped correctly — a QRegion clip is not)
+        # below is clipped correctly - a QRegion clip is not)
         clip = QtGui.QPainterPath()
         if square:
             box = QtCore.QRectF(cx - rad, cy - rad, rad * 2, rad * 2)
@@ -161,7 +161,7 @@ class _Canvas(QtWidgets.QWidget):
         # world map texture (under the rings/POIs)
         if self.s.minimap_texture:
             self._draw_map(p, cx, cy, scale, phi)
-        # rings (outline only — NoBrush, else they'd fill over the map texture)
+        # rings (outline only - NoBrush, else they'd fill over the map texture)
         p.setPen(QtGui.QColor(theme.BORDER))
         p.setBrush(QtCore.Qt.NoBrush)
         for f in (0.5, 1.0):
@@ -348,7 +348,7 @@ class MinimapOverlay(OverlayWindow):
         self.canvas.refresh()   # initial POIs immediately
 
     def set_bare(self, on: bool) -> None:
-        """Chromeless: hide the titlebar, hint, and card panel — just the map.
+        """Chromeless: hide the titlebar, hint, and card panel, just the map.
         Drag the map body to move it (when unlocked)."""
         self.titlebar.setVisible(not on)
         self._hint.setVisible(not on)

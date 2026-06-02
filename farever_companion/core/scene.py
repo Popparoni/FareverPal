@@ -1,28 +1,20 @@
 """Live scene reader (read-only, batched).
 
-Walks the scene graph from the player struct to the unit + element lists and
-reads every object's class, CDB id, owner and world position. Verified scene
-path (Farever EA, 2026-05-24):
+One batched read_many pulls a header block for every unit at once. An enemy is
+anything whose type descends from ent.Foe (HL super-chain) and is not hero-owned.
+
+Verified scene path (Farever EA, 2026-05-24):
 
     pbase (ent.Hero) +0x58  -> st.GameLayer
     st.GameLayer     +0x128 -> ArrayObj  (units: ent.Hero + ent.Foe subclasses)
     st.GameLayer     +0x120 -> ArrayObj  (elements: interactibles, no units)
-
-Per unit (ent.Unit subclasses share ent.GameObject layout):
-    +0x60 owner, +0x98/A0/A8 xyz (f64), +0x250 unit-id String, +0x3D0 attributes
-
-PERFORMANCE: one batched `read_many` pulls a 0x258-byte header block for every
-unit at once (turning hundreds of syscalls into one), then fields are parsed in
-Python and class/id strings resolved through the cached Hl reflection.
-
-CLASSIFICATION: an enemy is anything whose type descends from `ent.Foe` (via the
-HL super-chain) and is not owned by a hero — `ent.foe.Boss` etc. are included.
-This is the fix for the old boss-HP bug (it used exact `cls == "ent.Foe"`).
+    per unit: +0x60 owner, +0x98/A0/A8 xyz (f64), +0x250 unit-id, +0x3D0 attributes
 """
 from __future__ import annotations
 
 import math
 import struct
+import time
 from dataclasses import dataclass
 
 from .hl import Hl, is_ptr
@@ -30,6 +22,7 @@ from .proc import Proc
 from .constants import (   # offsets live in one place; re-exported for callers
     OFF_GAMELAYER, OFF_UNITS_ARR, OFF_ELEMS_ARR, OFF_OWNER, OFF_POS,
     OFF_UNITID, OFF_ELEMID, OFF_ELEMSTATE, UNIT_BLOCK,
+    OFF_CONFIG_DIFFICULTY, OFF_CONFIG_MAPID, OFF_BOX_VALUE, CONFIG_SCAN_BYTES,
 )
 
 _ELEM_KINDS = {
@@ -110,14 +103,68 @@ class Element:
 
 
 class Scene:
+    CONFIG_RESCAN_TTL = 1.0    # max once/sec to find the config when uncached
+
     def __init__(self, proc: Proc, hl: Hl):
         self.proc = proc
         self.hl = hl
+        self._cfg_off: int | None = None   # discovered GameLayer.config offset
+        self._cfg_scan_at = 0.0            # last full config scan (throttle)
 
     def gamelayer(self, pbase: int | None) -> int | None:
         if not pbase:
             return None
         return self.hl.ptr(pbase + OFF_GAMELAYER)
+
+    def difficulty(self, pbase: int | None) -> int | None:
+        """Instance difficulty from GameLayer.config: 0=Normal, 1=Hard, None
+        outside an instance. Independent of enemy levels. The config pointer's
+        offset on GameLayer drifts between builds, so it's discovered by signature
+        (mapId contains 'POI') and cached; see core/constants."""
+        gl = self.gamelayer(pbase)
+        if gl is None:
+            return None
+        if self._cfg_off is not None:
+            d = self._difficulty_at(self.hl.ptr(gl + self._cfg_off))
+            if d is not None:
+                return d
+            self._cfg_off = None
+        # uncached (outside an instance, or just entered): throttle the GameLayer
+        # sweep so a 20 Hz caller can't hammer it. Cached reads above stay O(1).
+        now = time.monotonic()
+        if now - self._cfg_scan_at < self.CONFIG_RESCAN_TTL:
+            return None
+        self._cfg_scan_at = now
+        blk = self.proc.try_read(gl, CONFIG_SCAN_BYTES)
+        if blk is None:
+            return None
+        for off in range(0, len(blk) - 7, 8):
+            p = struct.unpack_from("<Q", blk, off)[0]
+            if not is_ptr(p):
+                continue
+            d = self._difficulty_at(p)
+            if d is not None:
+                self._cfg_off = off
+                return d
+        return None
+
+    def _difficulty_at(self, cfg: int | None) -> int | None:
+        """Read difficulty from a candidate config struct, validating it's the
+        real one (mapId is a 'POI' String, difficulty box holds 0/1)."""
+        if not cfg:
+            return None
+        mp = self.hl.ptr(cfg + OFF_CONFIG_MAPID)
+        s = self.hl.hl_string(mp) if mp else None
+        if not s or "POI" not in s:
+            return None
+        box = self.hl.ptr(cfg + OFF_CONFIG_DIFFICULTY)
+        if not box:
+            return None
+        raw = self.proc.try_read(box + OFF_BOX_VALUE, 4)
+        if raw is None:
+            return None
+        v = struct.unpack("<i", raw)[0]
+        return v if v in (0, 1) else None
 
     def units(self, pbase: int | None) -> list[Entity]:
         gl = self.gamelayer(pbase)

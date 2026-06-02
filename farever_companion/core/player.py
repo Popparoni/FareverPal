@@ -1,25 +1,13 @@
-"""Pure-read player locator — no hook, no writes.
+"""Pure-read player locator (no hook, no writes).
 
-The PRIMARY locate is the scan-free GameApp-singleton anchor in
-`appsingleton.py` (session-stable, unambiguous). This module keeps a heap-scan
-FALLBACK for unexpected build layouts: it locates the local player's `ent.Hero`
-struct entirely by reading + scanning with the Rust `find_bytes`. Fallback
-strategy (write-free):
+The primary locate is the scan-free GameApp anchor in appsingleton.py. This
+module keeps a heap-scan fallback for unexpected build layouts:
 
-  1. Bootstrap the `ent.Hero` hl_type by string:
-       a. scan for the UTF-16 class name "ent.Hero\\0"  -> name string addr
-       b. scan for a pointer to that name              -> hl_type_obj (name @ +0x10)
-       c. scan for a pointer to that type_obj          -> hl_type (obj @ +8), kind=HOBJ
-     The type pointer is stable for the process, so it's cached; re-locating on a
-     zone change only re-runs step 2.
-  2. Scan rw heap for objects whose first qword == that hl_type  -> Hero instances.
-  3. Select the local player: prefer `Hero.ownerPlayer.isMe == 1` verified with
-     `Player.hero == Hero` (offsets calibrated live — constants below). Until
-     calibrated, fall back to the hero with the largest live unit list (the
-     loaded world), which is unambiguous in solo play.
-
-Their external scan took ~1 min; the targeted 8-byte type match should be much
-faster. Field offsets to calibrate live are isolated as constants.
+  1. Bootstrap the ent.Hero hl_type by class-name string (name -> type_obj ->
+     hl_type). The type ptr is stable, so it's cached.
+  2. Scan the rw heap for objects whose first qword is that hl_type.
+  3. Prefer Hero.ownerPlayer.isMe verified by Player.hero; else the hero with the
+     largest live unit list (unambiguous in solo). Calibration offsets below.
 """
 from __future__ import annotations
 
@@ -117,7 +105,7 @@ class PlayerLocator:
 
     def locate(self) -> int | None:
         # Primary: GameApp singleton -> hero (scan-free, session-stable, and
-        # unambiguous — GameApp.hero IS the local player).
+        # unambiguous - GameApp.hero IS the local player).
         try:
             hero = self.app.hero()
         except ProcError:
@@ -127,7 +115,7 @@ class PlayerLocator:
             return hero
         # Anchor IS resolved but there's no hero right now (main menu / loading
         # transition). Don't fall back to the expensive heap scan every relocate
-        # tick — the anchor produces the hero again on its own once back in-world.
+        # tick - the anchor produces the hero again on its own once back in-world.
         if self.app.anchored:
             self.address = None
             return None
@@ -157,8 +145,8 @@ class PlayerLocator:
         When the GameApp anchor is resolved (the normal path), this re-reads
         `GameApp.hero` every call: at the main menu that field is null, so this
         returns None (and the attach watcher re-applies 'located' the moment you
-        load back in). Only the heap-scan fallback build — where the anchor never
-        resolves — uses the last located address, re-validated so a stale pointer
+        load back in). Only the heap-scan fallback build, where the anchor never
+        resolves, uses the last located address, re-validated so a stale pointer
         after a zone change still degrades to None instead of reading garbage."""
         if self.app.anchored:
             hero = self.app.live_hero()

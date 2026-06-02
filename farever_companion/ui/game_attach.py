@@ -1,10 +1,10 @@
-"""Game attachment controller — attach / locate / detach + the auto-attach watcher.
+"""Game attachment controller, attach / locate / detach + the auto-attach watcher.
 
 Pulled out of ControlPanel: this owns the read-only lifecycle (the `Proc` handle,
 the `LiveModel`, the locate worker, and the 2 s `AutoAttach` poll) and nothing
 about the UI. It talks to the panel only through signals, so the panel stays a
 view: it shows the busy bar, status line, log, overlay-card gating, and closes
-the overlays — driven entirely by these signals.
+the overlays, driven entirely by these signals.
 
 Read-only throughout: the locate runs on a worker thread (a pure memory scan),
 and detach cleanly stops the model's background threads and closes the handle.
@@ -223,7 +223,7 @@ class GameAttachmentController(QtCore.QObject):
         """When detached, reflect the watcher state in the top-bar status line.
 
         Auto-attach is always on (no UI toggle); `auto_attach` survives as a
-        hidden settings.json escape hatch — if a user sets it false there, the
+        hidden settings.json escape hatch, if a user sets it false there, the
         watcher stops attaching and we just read 'detached'."""
         if self.proc is not None:
             return
@@ -236,7 +236,7 @@ class GameAttachmentController(QtCore.QObject):
         """Tear down the live session. Emits `detaching` FIRST so the panel closes
         the overlays before the model's background threads stop (overlays read the
         model). Called by the watcher (game closed), on update install, and on app
-        close — there is no manual detach button."""
+        close, there is no manual detach button."""
         self._busy = False
         self._located_shown = False
         self._stop_locate()

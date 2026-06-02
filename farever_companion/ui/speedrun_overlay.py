@@ -6,7 +6,7 @@ instant it dies (configurable). Tracks a per-boss best (PB) + last time,
 persisted in Settings.
 
 Out-of-process like every overlay: it only reads game memory (boss HP) to detect
-the kill — it never writes.
+the kill, it never writes.
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ class SpeedrunOverlay(OverlayWindow):
         self.state_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self.content.addWidget(self.state_lbl)
 
-        # Difficulty readout — shows what a finished run will upload as, and whether
+        # Difficulty readout - shows what a finished run will upload as, and whether
         # it was read from the live boss level ("detected") or is the manual
         # fallback ("manual", tinted gold so a guess is never mistaken for a read).
         self.mode_lbl = QtWidgets.QLabel("")
@@ -173,24 +173,24 @@ class SpeedrunOverlay(OverlayWindow):
                 self._latch.observe(self._live_mode, self._live_mode_src)
 
         # Auto-stop on boss kill, or CANCEL if the player left the dungeon (the
-        # boss despawning at full HP — e.g. going to the main menu — is not a kill).
+        # boss despawning at full HP - e.g. going to the main menu - is not a kill).
         if running and boss is not None:
             if t.feed_boss(*boss) == t.LEFT:
                 self._on_run_aborted()
 
         # Auto-start: only INSIDE a dungeon, and only on real physical movement
-        # from a settled spawn baseline (consistent — never on the teleport-in).
+        # from a settled spawn baseline (consistent - never on the teleport-in).
         if t.state == t.READY and self.model is not None:
             self._check_auto_start()
 
-        # Run just started → arm a fresh upload + a fresh difficulty latch.
+        # Run just started -> arm a fresh upload + a fresh difficulty latch.
         if t.state == t.RUNNING and self._prev_state != t.RUNNING:
             self._uploaded = False
             self._latch.reset()
             self.upload_lbl.hide()
             self._upload_btn.hide()
 
-        # Run just finished → capture difficulty, PB, upload. Prefer the value
+        # Run just finished -> capture difficulty, PB, upload. Prefer the value
         # latched while the boss was alive over a fresh read (the boss is dead
         # now, so a fresh read often can't see it). PB + auto-upload only count a
         # CONFIRMED kill (a manual stop must never set a bogus PB or auto-submit).
@@ -202,7 +202,7 @@ class SpeedrunOverlay(OverlayWindow):
             self._maybe_upload()
 
         # Back-to-back: after a finished run, re-arm for the next one without the
-        # user clicking reset — once they leave the dungeon, or after a short
+        # user clicking reset - once they leave the dungeon, or after a short
         # grace so the finished time is readable first. Toggleable.
         if t.state == t.DONE and self.s.speedrun_auto_rearm:
             self._done_ctr += 1
@@ -265,7 +265,7 @@ class SpeedrunOverlay(OverlayWindow):
             self.upload_lbl.show()
             return
         if not self.timer.is_kill:
-            # finished without a detected kill — never auto-submit; let the user
+            # finished without a detected kill - never auto-submit; let the user
             # decide via the manual button (the leaderboard also screens times).
             self.upload_lbl.setText("no boss kill detected — upload manually if this was a real run")
             self.upload_lbl.setStyleSheet(f"color:{theme.GOLD};background:transparent;")
@@ -295,7 +295,7 @@ class SpeedrunOverlay(OverlayWindow):
     def _resolve_mode(self) -> tuple[str, str]:
         """(difficulty, source) to upload as. source is "auto" when read from the
         live boss level (Auto Detect Boss Run on + level readable), else "manual"
-        — the fallback selector, used when auto is off OR the level can't be read
+       , the fallback selector, used when auto is off OR the level can't be read
         (e.g. the level offset isn't calibrated on this build)."""
         if self.s.speedrun_auto and self.model is not None:
             try:

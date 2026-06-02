@@ -1,10 +1,7 @@
-"""Chest loot-table resolution + static/live merge (pure policy, no memory reads).
+"""Chest loot-table resolution and static/live merge (pure policy, no memory reads).
 
-Pulled out of LiveModel: the per-chest table cache, the boss re-attribution
-rules, and the merge of the static overworld chest index with the live scene's
-chest elements are a self-contained policy. The model owns the live scene and
-hands in the current dungeon boss + the live chest list; this class owns the
-caching and the merge so LiveModel stays a thin coordinator.
+Owns the per-chest table cache, boss re-attribution, and the merge of the static
+overworld chest index with the live scene's chests, so LiveModel stays thin.
 """
 from __future__ import annotations
 
@@ -40,12 +37,9 @@ class ChestResolver:
 
     def chest_table(self, chest_id: str, dungeon_boss: str | None,
                     default_table: str | None = None) -> str | None:
-        """Resolve a chest's loot table. Non-boss chests are cached once (so they
-        can't flicker). Boss chests are NEVER cached — the static index maps the
-        generic `BossChest` template to a placeholder (`UpgradeItems_Activity`),
-        so we re-attribute it to the live dungeon boss every frame. Caching that
-        would lock in the placeholder (if resolved before the boss loaded) or a
-        stale boss carried over from a previous dungeon."""
+        """Resolve a chest's loot table. Non-boss chests are cached once so they
+        can't flicker; boss chests are never cached, since they re-attribute to
+        the live dungeon boss each frame."""
         boss_chest = chest_id.startswith("BossChest")
         if not boss_chest and chest_id in self._table_cache:
             return self._table_cache[chest_id]
@@ -61,9 +55,7 @@ class ChestResolver:
         rows: dict[str, ChestRow] = {}
         for c, d in chestdb.nearest(self.chests, *xyz, n=10 ** 6):
             tbl = self.chest_table(c.chest_id, dungeon_boss, c.loot_table)
-            # A static (overworld) boss chest for a DIFFERENT boss can't be in
-            # the current boss instance — drop it so e.g. Crabgantua's arena
-            # chest doesn't leak in while you're fighting Cleodora.
+            # drop a static boss chest belonging to a different boss
             if (tbl and dungeon_boss and tbl != dungeon_boss
                     and udata.is_boss(tbl)):
                 continue

@@ -1,9 +1,9 @@
-"""In-app updater — checks GitHub Releases (via the website's /api/release.php
+"""In-app updater, checks GitHub Releases (via the website's /api/release.php
 oracle) and self-replaces the one-file exe.
 
 Flow: the desktop app asks farever-pals.com what the latest release is (the site
-already knows the GitHub repo from its Download config), compares versions, and —
-if newer — downloads the GitHub asset, verifies it, and swaps itself on disk.
+already knows the GitHub repo from its Download config), compares versions, and -
+if newer, downloads the GitHub asset, verifies it, and swaps itself on disk.
 
 Windows wrinkle: a running .exe is locked and can't be overwritten, but it *can*
 be renamed. So we rename the live exe to `*.old`, move the new one into place,
@@ -83,7 +83,7 @@ def cleanup_old() -> None:
         if old.exists():
             old.unlink()
     except OSError:
-        pass            # still locked / in use — next launch will get it
+        pass            # still locked / in use - next launch will get it
 
 
 # --- check -----------------------------------------------------------------
@@ -118,7 +118,7 @@ def download_and_stage(info: UpdateInfo, progress=None) -> Path:
     (caller keeps the current install untouched).
 
     Handles both kinds of asset we publish: a **bare .exe** (the current
-    convention) and a **.zip** containing the exe — detected by content, not by
+    convention) and a **.zip** containing the exe, detected by content, not by
     URL, so naming never matters. Streams to a temp file rather than buffering
     the whole ~300 MB payload in RAM. `progress(done, total)` is called during
     download (total may be 0 if unknown)."""
@@ -208,7 +208,7 @@ def apply_and_relaunch(new: Path) -> None:
     try:
         os.replace(new, cur)
     except OSError:
-        os.replace(old, cur)        # roll back — install stays on the old version
+        os.replace(old, cur)        # roll back - install stays on the old version
         raise
 
     flags = 0x00000008 | 0x00000200    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP

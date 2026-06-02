@@ -1,23 +1,10 @@
-"""Read-only damage-event source via `ui.comp.DamageDisplay` (Phase 6).
+"""Read-only per-skill damage source via `ui.comp.DamageDisplay`.
 
-Implements the competitor's technique WITHOUT hooking the allocator (a detour is
-a code write). Each tick we enumerate the live `ui.comp.DamageDisplay` objects
-(the floating numbers the game renders for YOUR client — already filtered to your
-outgoing/visible damage), read each one's `st.skill.DamageResult`
-{ skill, amount, crit, kill, target, kind }, dedupe by object identity over its
-short life, and tag any whose target is our own hero as `incoming` (damage taken
-/ DoT — fed to the DTPS + death-recap aggregate, never the outgoing headline).
-The result feeds DpsMeter.add_event for per-(kind,skill) / crit / kill stats.
-
-`kind` (damage|heal|shield) comes from `OFF_RESULT_KIND` once calibrated (an
-enum/sign on DamageResult; see `KIND_MAP`). Until that offset is pinned every
-event reads as `kind="damage"` — heals/shields simply don't separate out yet
-(we never fabricate a heal value).
-
-STATUS: the class is located by the same string→type→instances scan as the
-player; the field OFFSETS below must be calibrated live. Until then
-`calibrated()` is False and `poll()` returns [] — so the meter cleanly uses the
-HP-diff fallback and never emits fabricated events.
+Each tick, enumerate the live DamageDisplay objects (the floating numbers the
+game renders for the local client), read each one's `st.skill.DamageResult`,
+dedupe over its short life, and feed DpsMeter.add_event. Self-only by design.
+Until the field offsets below are calibrated, `calibrated()` is False, `poll()`
+returns [], and the meter falls back to HP-diff. Never fabricates an event.
 """
 from __future__ import annotations
 
@@ -31,47 +18,33 @@ from .constants import TO_NAME
 from .proc import Proc, ProcError
 from ..combat.dps import DamageEvent
 
-# --- calibrated live 2026-05-30 (build 13,358,488 B) via HL type reflection:
-# ui.comp.DamageDisplay -> st.skill.DamageResult field offsets read straight from
-# the runtime fields_indexes table (names preserved). These are struct field
-# offsets (stable for the build); the type pointer itself is still located
-# dynamically by name in `_find_type`. Re-validate live if a patch shifts the layout.
+# Calibrated live 2026-05-30 (build 13,358,488 B) from the runtime fields_indexes
+# table. Struct field offsets, stable for the build; the type ptr is still located
+# by name in `_find_type`. Re-validate live if a patch shifts the layout.
 OFF_DISPLAY_RESULT: int | None = 0x498  # DamageDisplay.dmg -> st.skill.DamageResult
 OFF_RESULT_AMOUNT: int | None = 0x50    # DamageResult._amount (f64)
-OFF_RESULT_SKILL: int | None = 0x08     # DamageResult.baseSkill (-> st.skill.BaseSkill)
+OFF_RESULT_SKILL: int | None = 0x08     # DamageResult.baseSkill -> st.skill.BaseSkill
 OFF_RESULT_CRIT: int | None = 0x69      # DamageResult._critical (bool, 1 byte)
 OFF_RESULT_KILL: int | None = 0x68      # DamageResult._kill (bool, 1 byte)
-OFF_RESULT_TARGET: int | None = 0x28    # DamageResult.target (-> ent.GameObject)
-OFF_SKILL_ID: int | None = 0xA0         # BaseSkill.kind (String) — per-skill name
-# No heal/shield discriminator on DamageResult — heals render via a separate
-# display class (a HealDisplay sibling, not yet sourced). Leave kind=damage; never
-# fabricate a heal.
-OFF_RESULT_KIND: int | None = None      # DamageResult.kind enum (i32), or None
+OFF_RESULT_TARGET: int | None = 0x28    # DamageResult.target -> ent.GameObject
+OFF_SKILL_ID: int | None = 0xA0         # BaseSkill.kind (String), per-skill name
+OFF_RESULT_KIND: int | None = None      # DamageResult.kind enum (i32); no source yet
 
-# Map the raw DamageResult.kind enum value -> our kind label. Fill this in when
-# OFF_RESULT_KIND is calibrated (take a heal, gain a shield, note the value);
-# any value not in the map degrades to "damage".
+# raw DamageResult.kind enum -> our label; unmapped values degrade to "damage".
 KIND_MAP: dict[int, str] = {}
 
-# --- cluster-scan tuning ----------------------------------------------------
-# Pad each located instance into a window and merge nearby windows, so the per-
-# tick scan covers the GC size-class pages where new DamageDisplays will spawn —
-# not just the exact addresses that were live during the (slow) discovery scan.
-# HashLink's GC pages are 64 KiB; these are deliberately generous (cluster spread
-# is bounded by how many same-size pages the class occupies) but still tiny next
-# to the ~23 GB heap. Tune from the measured cluster spread + scan time.
-RANGE_PAD = 1 << 18          # 256 KiB each side (coverage comes from accumulated anchors)
-RANGE_MERGE_GAP = 1 << 20    # coalesce instances whose padded windows are <1 MiB apart
-MAX_SCAN_BYTES = 512 << 20   # safety cap: never let derived ranges exceed 512 MiB
-MAX_ANCHORS = 8000           # bound on the accumulated anchor set
+# Cluster-scan tuning. The GC is non-moving and size-class-segregated, so padding
+# known instance addresses and merging neighbours covers the pages where future
+# DamageDisplays spawn. Generous but tiny next to the ~23 GB heap.
+RANGE_PAD = 1 << 18
+RANGE_MERGE_GAP = 1 << 20
+MAX_SCAN_BYTES = 512 << 20
+MAX_ANCHORS = 8000
 
 
 def cluster_ranges(addrs: list[int], pad: int = RANGE_PAD,
                    merge_gap: int = RANGE_MERGE_GAP) -> list[tuple[int, int]]:
-    """Collapse a set of instance addresses into a small list of merged
-    `(base, len)` scan ranges. Pure/testable. Relies on the GC being non-moving
-    and size-class-segregated: padding the known addresses and merging neighbours
-    covers the pages where future same-class objects appear."""
+    """Collapse instance addresses into merged `(base, len)` scan ranges."""
     pts = sorted(set(a for a in addrs if a > 0))
     if not pts:
         return []
@@ -90,9 +63,7 @@ def cluster_ranges(addrs: list[int], pad: int = RANGE_PAD,
 
 def clip_ranges(ranges: list[tuple[int, int]],
                 regions: list[tuple]) -> list[tuple[int, int]]:
-    """Intersect scan ranges with committed readable `regions` (each `(base,
-    size, ...)` from `Proc.regions()`) so a padded range never straddles an
-    unmapped gap. Pure/testable."""
+    """Intersect scan ranges with committed readable regions."""
     if not ranges:
         return []
     regs = sorted((b, b + s) for b, s, *_ in regions)
@@ -122,26 +93,16 @@ class DamageReader:
         self.hl = hl
         self.my_hero = my_hero
         self._type_ptr: int | None = None
-        # optional override (e.g. FAREVER_DMG_TYPE=0x163ae3c97f8): skip the slow
-        # heap scan when the type ptr is already known for this game session. It's
-        # verified by class name before use, so a stale ptr falls back to the scan.
+        # FAREVER_DMG_TYPE: known type ptr for the session, skips the heap scan.
+        # Verified by class name before use, so a stale ptr falls back to the scan.
         self._type_hint: str | None = os.environ.get("FAREVER_DMG_TYPE")
-        # Dedup by CONTENT signature per display, not by address: the non-moving
-        # GC recycles freed DamageResult/DamageDisplay slots under sustained combat,
-        # so a new number can reuse a just-freed address. An address-only "seen" set
-        # would skip it (undercount → "only a few skills"). Keyed by DamageDisplay
-        # addr -> last-emitted (res, amount, skill, crit, kill); emit on change.
+        # Dedup by content signature, not address: the GC recycles freed slots
+        # under sustained combat, so a new number can reuse a just-freed address.
         self._sig: dict[int, tuple] = {}
-        # Cluster-scan state: HashLink's GC is non-moving and segregates objects by
-        # size class into shared pages, so every live DamageDisplay (the persistent
-        # ~20 AND each transient floating number) lives in the same handful of GC
-        # pages. We locate that cluster once (slow full scan), then re-enumerate it
-        # each tick by scanning ONLY those ranges (tens of MB, sub-100ms) — fast
-        # enough to catch a number during its ~1s life (see core/damage_source.py).
         self._scan_ranges: list[tuple[int, int]] = []
         self._ranges_ready = False
         self._last_count = 0
-        self._anchor_addrs: set[int] = set()   # accumulated instance addrs (union of derives)
+        self._anchor_addrs: set[int] = set()
 
     @staticmethod
     def calibrated() -> bool:
@@ -153,7 +114,6 @@ class DamageReader:
     def _find_type(self) -> int | None:
         if self._type_ptr is not None or not self.proc.has_scan:
             return self._type_ptr
-        # 0) verified override — instant when the type ptr is known for the session
         if self._type_hint:
             try:
                 cand = int(self._type_hint, 0)
@@ -161,14 +121,12 @@ class DamageReader:
                     self._log(f"using FAREVER_DMG_TYPE hint {cand:#x}")
                     self._type_ptr = cand
                     return cand
-                self._log("FAREVER_DMG_TYPE hint stale (class mismatch) — scanning")
+                self._log("FAREVER_DMG_TYPE hint stale (class mismatch); scanning")
             except (ProcError, OSError, ValueError):
-                self._log("FAREVER_DMG_TYPE hint unreadable — scanning")
+                self._log("FAREVER_DMG_TYPE hint unreadable; scanning")
             self._type_hint = None
-        # 1) locate the type by name. The class-name string may sit in read-only
-        # const data, but every back-reference (type_obj.name, hl_type+8, and the
-        # live instances) lives in the WRITABLE heap — so the two nested scans use
-        # rw_only=True, which skips the read-only mapped regions.
+        # Back-references (type_obj.name, hl_type+8, instances) live in the
+        # writable heap even though the name string may be read-only const data.
         t0 = time.monotonic()
         names = self.proc.find_bytes(_utf16z(self.CLASS), align=2,
                                      rw_only=False, max_hits=64)
@@ -190,15 +148,8 @@ class DamageReader:
         return None
 
     def refresh_ranges(self) -> int:
-        """SLOW (one ~heap sweep): locate the type, enumerate every live
-        DamageDisplay, and derive the small set of GC-page ranges they cluster
-        into. Call occasionally on a maintenance thread (NOT every tick) so the
-        ranges keep up as the GC grows new size-class pages. `poll()` then scans
-        only those ranges, cheaply. Returns the instance count found.
-
-        Run it while damage is flowing (more instances alive -> a tighter, more
-        representative cluster). It still works idle (the persistent ~20 instances
-        pin the same pages), just with fewer anchor points."""
+        """Slow (~heap sweep): re-derive the GC-page ranges the displays cluster
+        into. Run occasionally on a maintenance thread; `poll()` scans the ranges."""
         if not self.calibrated():
             return 0
         tp = self._find_type()
@@ -208,19 +159,13 @@ class DamageReader:
             insts = self.proc.find_qword(tp, rw_only=True, max_hits=4096)
         except (ProcError, OSError):
             return self._last_count
-        # ACCUMULATE anchors across derives (union) — a later weak/lull derive can
-        # only ADD coverage, never shrink it. The GC is non-moving and a page keeps
-        # its size class for life, so old anchors stay valid; clip_ranges below drops
-        # any page the GC has since freed+decommitted. This converges to COMPLETE
-        # coverage of the size-class page chain and stays there (fixes the stale /
-        # regressing cluster that silently dropped events mid-fight).
+        # Accumulate anchors across derives: old anchors stay valid (non-moving GC),
+        # clip_ranges drops freed pages. Converges to complete page coverage.
         self._anchor_addrs.update(insts)
         if len(self._anchor_addrs) > MAX_ANCHORS:
             self._anchor_addrs = set(sorted(self._anchor_addrs)[-MAX_ANCHORS:])
         anchors = sorted(self._anchor_addrs)
         ranges = cluster_ranges(anchors)
-        # clip to committed regions (reads never span an unmapped gap; also prunes
-        # freed pages) and enforce the safety cap by tightening the pad if needed.
         try:
             ranges = clip_ranges(ranges, self.proc.regions())
         except (ProcError, OSError):
@@ -246,16 +191,8 @@ class DamageReader:
             return []
 
     def poll(self) -> list[DamageEvent]:
-        """FAST (range-bounded scan): re-enumerate the live DamageDisplay objects
-        by scanning ONLY the cluster ranges, then emit an event for each display
-        whose shown number changed since last poll. Dedup is by a CONTENT signature
-        (res, amount, skill, crit, kill) keyed per display — robust to the GC
-        recycling slots mid-combat (a recycled address carries a new signature, so
-        it still emits). [] until `refresh_ranges()` has run.
-
-        Incoming hits (target == our hero) are NOT emitted here: damage TAKEN is
-        derived from our own HP drops (model `_sample_player_hp`), which is reliable
-        whether or not the game renders a DamageDisplay for incoming damage."""
+        """Fast range-bounded scan: emit an event per display whose number changed.
+        Incoming hits (target == our hero) are skipped; taken damage is HP-derived."""
         tp = self._type_ptr
         if tp is None or not self._scan_ranges:
             return []
@@ -274,23 +211,21 @@ class DamageReader:
                 continue
             target = self.hl.ptr(res + OFF_RESULT_TARGET)
             if self.my_hero and target == self.my_hero:
-                continue                       # incoming (taken) — HP-derived instead
+                continue
             ev = self._read_event(res, target, False)
-            # the cluster also holds the class singleton + freed slots whose
-            # DamageResult is junk; a REAL hit has a sane amount + clean ASCII
-            # skill id ("Mace_Base_Attack"), garbage decodes to huge numbers / CJK.
             if not self._plausible(ev):
                 continue
             sig = (res, int(ev.amount), ev.skill, ev.crit, ev.kill)
             cur[disp] = sig
-            if self._sig.get(disp) != sig:     # a NEW number on this display
+            if self._sig.get(disp) != sig:
                 events.append(ev)
-        # retain only currently-present displays so a later reuse re-emits
         self._sig = cur
         return events
 
     @staticmethod
     def _plausible(ev: DamageEvent) -> bool:
+        # a real hit has a sane amount and a clean ASCII skill id; junk slots
+        # decode to huge numbers or CJK
         s = ev.skill
         return (0.0 < ev.amount < 1e7
                 and bool(s) and s != "?" and s.isascii() and s.isprintable())
@@ -305,9 +240,6 @@ class DamageReader:
                 amount = float(self.hl.i32(res + OFF_RESULT_AMOUNT))
         except (ProcError, OSError):
             pass
-        # Stale/pooled DamageDisplays carry amount<=0 and a garbage baseSkill ptr;
-        # resolving its name can hit unmapped memory — guard so one bad slot can't
-        # break the whole poll (the meter ignores amount<=0 anyway).
         skill = "?"
         if OFF_RESULT_SKILL is not None and OFF_SKILL_ID is not None:
             try:
@@ -323,8 +255,8 @@ class DamageReader:
                            target=str(target), kind=kind, incoming=incoming)
 
     def _flag(self, res: int, off: int | None) -> int:
-        # _kill (+0x68) and _critical (+0x69) are adjacent single-byte bools, so
-        # read ONE byte — an i32 read would bleed the neighbour into the value.
+        # _kill (+0x68) and _critical (+0x69) are adjacent 1-byte bools; read one
+        # byte so an i32 read can't bleed the neighbour in
         if off is None:
             return 0
         raw = self.proc.try_read(res + off, 1)

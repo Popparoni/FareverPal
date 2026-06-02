@@ -1,25 +1,10 @@
-"""DPS engine — pure logic, headless-testable (no process reads here).
+"""DPS engine: pure logic, headless-testable (no process reads).
 
-Two damage sources feed the same aggregator:
-
-1. HP-DIFF (fallback): fed a per-tick snapshot of (addr, unit_id, hp), it diffs
-   each enemy's Health over time to derive outgoing damage. Team/area total
-   (can't attribute a hit to a player without a damage source). Bosses are
-   tracked the same as any enemy — the caller must NOT drop them by radius
-   (that was the old "boss HP missing" bug). Address reuse is guarded by a
-   unit-id change / implausible HP jump (rebaseline, not huge damage). An enemy
-   that vanishes while nearly dead and recently damaged is credited a kill.
-
-2. EVENTS (preferred, per-skill): `add_event(DamageEvent)` from the
-   `ui.comp.DamageDisplay` reader (see core/damage.py). Gives per-skill totals,
-   crit%, max hit, kills — the game pre-filters to your own outgoing damage. An
-   event carries a `kind` (damage|heal|shield) and an `incoming` flag (damage
-   *taken* by self, for the survivability / DTPS readout). Per-skill stats are
-   keyed by (kind, skill) so heals/shields never pollute the damage table.
-
-Both maintain a rolling-window DPS/HPS/SPS, encounter totals, and per-target /
-per-(kind,skill) breakdowns. The UI shows per-skill when events are present,
-else per-target. The headline `current_dps()` is damage-only by design.
+Two sources feed one aggregator. HP-diff takes a per-tick (addr, unit_id, hp)
+snapshot and diffs each enemy's health into a team/area total; address reuse is
+guarded by a unit-id change or implausible HP jump. Events (add_event, from the
+DamageDisplay reader) give per-skill totals, crit%, kills, and a taken/DTPS
+readout. Stats are keyed by (kind, skill); current_dps() is damage-only.
 """
 from __future__ import annotations
 
@@ -81,9 +66,9 @@ class DpsMeter:
 
     def reset(self) -> None:
         self.tracks: dict[int, Track] = {}
-        # outgoing rolling window — (t, kind, amount)
+        # outgoing rolling window - (t, kind, amount)
         self.events: deque[tuple[float, str, float]] = deque()
-        # incoming (damage taken) rolling window — (t, amount)
+        # incoming (damage taken) rolling window - (t, amount)
         self.incoming: deque[tuple[float, float]] = deque()
         self.per_target: dict[str, float] = {}
         self.per_skill: dict[tuple[str, str], SkillStat] = {}   # (kind, skill) -> stat
@@ -170,7 +155,7 @@ class DpsMeter:
     def add_taken(self, amount: float, now: float | None = None) -> None:
         """Record damage TAKEN by self (for DTPS / TAKEN / death recap). Fed from
         the player's own HP drops (model `_sample_player_hp`) so the survivability
-        numbers always track the HP bar — independent of whether the game renders a
+        numbers always track the HP bar, independent of whether the game renders a
         DamageDisplay for incoming damage. Does NOT set `has_events` (it's not a
         per-skill outgoing event), so it never flips the table into per-skill mode."""
         now = time.monotonic() if now is None else now

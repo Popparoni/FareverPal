@@ -1,22 +1,13 @@
 """Per-unit loot: CDB unit-id -> drop table -> predicted drops, plus boss
-detection.
+detection. Pure (CDB-only), so a unit-id always resolves to the same table.
 
 Chain (verified against the CDB):
-    unit.json      id    -> type (e.g. "Kobold"), lvl, maxLvl, faction, flags
-    unitType.json  type  -> lootTable (e.g. "Kobold"); None for non-droppers
+    unit.json      id    -> type, lvl, maxLvl, faction, flags
+    unitType.json  type  -> lootTable (None for non-droppers)
     lootTable.json       -> recursive expansion (loot.predict)
 
-Boss detection (broadened vs the old tool, which only matched id==table):
-  1. NAMED bosses: a unit whose id also names a loot table (MunsterChuck unit
-     -> MunsterChuck table). Their signature drops live there, not in the
-     generic type table. (10 of these.)
-  2. FLAGS bit: bosses/elites carry a flag bit in unit.flags. The exact bit
-     needs live calibration; BOSS_FLAG_BIT stays None until then, and this path
-     is a no-op so we never mislabel.
-
-Determinism: every function here is PURE (depends only on the CDB), so a given
-unit-id always resolves to the same table — the source of the old "loot shows
-inconsistently" bug was the *live* layer, not this. See core/model.py.
+Boss detection: a unit whose id also names a loot table (named bosses), or one
+whose unit.flags carries BOSS_FLAG_BIT.
 """
 from __future__ import annotations
 
@@ -24,11 +15,8 @@ from functools import lru_cache
 
 from . import cdb, loot
 
-# The bit in unit.flags that marks a boss. Calibrated from the CDB: exactly 13 of
-# 403 units carry 0x10 — all 10 named bosses PLUS Phrixes/PhrixesP1/Ulserous
-# (bosses whose id doesn't name a loot table, so the named-list missed them), and
-# zero trash mobs. So 0x10 cleanly identifies bosses and broadens detection beyond
-# the named list.
+# unit.flags boss bit, calibrated from the CDB: exactly 13 of 403 units carry
+# 0x10 (all named bosses plus Phrixes/PhrixesP1/Ulserous), zero trash mobs.
 BOSS_FLAG_BIT: int | None = 0x10
 
 

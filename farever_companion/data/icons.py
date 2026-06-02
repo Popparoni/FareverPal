@@ -5,7 +5,7 @@ htdocs/assets/icons/<sheet>/<id>.png (the same set the web wiki uses). Scaled
 smoothly and cached by (sheet, id, size). Missing icons fall back to a small
 flat placeholder so the UI never breaks on a gap.
 
-LAYERING NOTE: this is a deliberately UI-adjacent data module — it renders
+LAYERING NOTE: this is a deliberately UI-adjacent data module, it renders
 QPixmaps, so it is the one `data/` module that touches Qt. To keep the headless
 layering contract intact (data/ must import without a GUI toolkit installed), Qt
 is imported LAZILY inside `_qt()`, never at module scope. The layering guard in
@@ -67,7 +67,7 @@ def has_icon(sheet: str, id_: str) -> bool:
 
 @lru_cache(maxsize=4096)
 def tile(sheet: str | None, id_: str | None, size: int, accent: str):
-    """Game icon on a rounded, accent-tinted square — the standard row leading
+    """Game icon on a rounded, accent-tinted square, the standard row leading
     element (Loot table + both HUDs). `accent` is a hex color (rarity / faction
     / gold / cyan). Background = accent @18%, 1px border = accent @55%, the PNG
     centred with ~2px padding. Missing PNG -> the tinted square still shows."""
@@ -89,7 +89,7 @@ def tile(sheet: str | None, id_: str | None, size: int, accent: str):
 
 
 def _silhouette(g, color):
-    """A solid-`color` silhouette of pixmap `g`, preserving its alpha — i.e. the
+    """A solid-`color` silhouette of pixmap `g`, preserving its alpha, i.e. the
     icon's organic shape filled flat. (SourceIn keeps `g`'s alpha, replaces RGB.)"""
     QtGui, QtCore = _qt()
     sil = QtGui.QPixmap(g.size())
@@ -111,7 +111,7 @@ def _disk_offsets(r: int):
 def outlined(sheet: str | None, id_: str | None, size: int, accent: str,
              border: int = 2):
     """Game icon drawn as itself with an accent border hugging the PNG's
-    *organic* alpha shape — no square tile. For map markers that should read as
+    *organic* alpha shape, no square tile. For map markers that should read as
     the item/enemy art. Built by dilating the icon's silhouette (a thin dark
     keyline for legibility over the map, then the accent border) and drawing the
     full-colour icon on top. Missing PNG -> a plain accent dot."""
@@ -217,7 +217,7 @@ def ui_qicon(name: str, color: str, size: int = 18):
 @lru_cache(maxsize=64)
 def brand_icon(name: str, size: int):
     """A multi-color brand glyph from assets/icons_ui/<name>.svg rendered AS-IS
-    (no tinting) — for logos like the Google "G" that aren't single-color.
+    (no tinting), for logos like the Google "G" that aren't single-color.
     Missing/invalid -> transparent pixmap. Cached by (name, size)."""
     QtGui, QtCore = _qt()
     from PySide6.QtSvg import QSvgRenderer

@@ -1,9 +1,9 @@
-"""DPS meter overlay — the headline panel.
+"""DPS meter overlay, the headline panel.
 
 Big live DPS, a sparkline, a survivability strip (incoming DTPS, own HP, death
 recap), and reviewable recent-cycle history with a local personal-best parse per
 boss. The per-skill breakdown lives in its own Skills panel (skill_overlay.py) so
-this stays uncrowded. Self DPS only (self-only by design — the game only renders
+this stays uncrowded. Self DPS only (self-only by design, the game only renders
 a DamageDisplay for your own client; see CLAUDE.md). Read-only.
 """
 from __future__ import annotations
@@ -148,7 +148,7 @@ class DpsOverlay(OverlayWindow):
         self.chart = Sparkline(theme.ACCENT)
         self.content.addWidget(self.chart)
 
-        # by-enemy-type breakdown (HP-diff) — which enemies your damage is going into
+        # by-enemy-type breakdown (HP-diff) - which enemies your damage is going into
         self._tgt_header = SectionHeader("BY ENEMY")
         self.content.addWidget(self._tgt_header)
         self._tgt_rows = [SkillRow() for _ in range(N_ENEMY)]

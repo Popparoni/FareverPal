@@ -1,4 +1,4 @@
-"""Farever Companion — read-only live companion + QA tool.
+"""Farever Companion, read-only live companion + QA tool.
 
 PySide6 UI + a Rust memory-reader, fully read-only against the game. See
 docs/ARCHITECTURE.md for how a frame flows from raw memory to a pixel.

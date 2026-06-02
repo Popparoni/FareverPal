@@ -1,16 +1,9 @@
 """Procedural loot-token handling.
 
-A few loot-table "items" are generator tokens the game resolves at drop time:
-
-    WorldLoot              -> a random world-gear item
-    WorldLootWithAffinity  -> a random affinity weapon
-    WorldRecipeWithJob     -> a random craft recipe for the player's job
-
-SAFETY: we do NOT fabricate a specific item pool for these (the wiki's
-`via_token` reconstruction is unreliable — it swept boss-exclusive weapons into
-world pools). The UI shows them as an honest "🎲 random X" row. The `expand`
-helper (boss-filtered) is retained only for an OPTIONAL "estimated pool" view,
-never as a confirmed drop claim.
+A few loot-table "items" are generator tokens the game resolves at drop time
+(WorldLoot, WorldLootWithAffinity, WorldRecipeWithJob). We never fabricate a
+concrete pool for these; the UI shows an honest "random X" row. The boss-filtered
+`expand` helper backs only an optional estimated-pool view, never a drop claim.
 """
 from __future__ import annotations
 
@@ -37,7 +30,7 @@ def label(item_id: str | None) -> str | None:
 
 @lru_cache(maxsize=1)
 def _boss_table_items() -> frozenset[str]:
-    """Every item reachable from a named-boss signature table — these are boss
+    """Every item reachable from a named-boss signature table, these are boss
     drops, excluded from world-pool estimates."""
     tables = loot._tables()
 

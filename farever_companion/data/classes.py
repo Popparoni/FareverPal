@@ -1,7 +1,7 @@
 """Player class <-> aptitude <-> item relevance.
 
 Farever has 4 player classes; each maps to one combat aptitude (verified vs
-aptitude.json — the aptitude's name IS the class):
+aptitude.json, the aptitude's name IS the class):
 
     Warrior -> Fighter (Strength), Rogue -> Assassin (Dexterity),
     Mage -> Wizard (Intellect), Priest -> Cleric (Faith)

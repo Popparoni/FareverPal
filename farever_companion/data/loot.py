@@ -1,30 +1,15 @@
-"""Loot predictor — recursive expansion of a loot table to expected per-item
-drop probability.
+"""Loot predictor: recursive expansion of a loot table to expected per-item
+drop probability. Pure data, no attached process.
 
-Two entry kinds, selected by the table's `flags` (CDB column
-`lootTable.flags`, a TFlags{Weights=1, WithAffinity=2}):
+Two entry kinds, selected by the table's flags (lootTable.flags,
+TFlags{Weights=1, WithAffinity=2}):
 
-* **Independent-roll table (Weights flag clear).** Each entry rolls on its
-  own: an item entry drops with probability `proba`; a sub-table entry rolls
-  the sub-table with probability `proba`. Probabilities accumulate additively
-  and a table can yield several (or zero) items. This is the default and
-  covers trash mobs, crates and currency tables.
-
-* **Weighted pick-one table (Weights flag set).** The engine makes a single
-  *normalized* weighted pick over the eligible entries — `proba` is a relative
-  weight, not an absolute chance — and always yields exactly one outcome (see
-  `genLootTable(id, level, autoPick, count=1)` + `pickWeightNorm` in the
-  bytecode; findings/formulas.md §2). So MunsterChuck's two 0.01-weight weapons
-  are 50%/50% of a guaranteed weapon, not 1%/1%. Every boss's `bossLootTable`
-  is a Weights table — a boss always drops a weapon; the rarity is rolled on
-  top (see data/rarity.py) and the genuinely-rare cosmetic lives in the boss's
-  separate (non-Weights) `lootTable`.
-
-This corrects an earlier port of this table that never normalized Weights
-tables — it matched the original's internal predict step but not observed
-drops. See findings/drops.md §"How drops work".
-
-Pure data: needs no attached process.
+* Independent-roll (Weights clear): each entry drops on its own with `proba`,
+  accumulating additively; a table can yield several or zero items. Default for
+  trash, crates and currency.
+* Weighted pick-one (Weights set): one normalized weighted pick over the
+  eligible entries (`proba` is a relative weight), always exactly one outcome.
+  Every boss bossLootTable is a Weights table. See findings/formulas.md.
 """
 from __future__ import annotations
 

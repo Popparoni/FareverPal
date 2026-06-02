@@ -1,4 +1,4 @@
-"""Reusable styled widgets — the Tactical Overlay component library.
+"""Reusable styled widgets, the Tactical Overlay component library.
 
 Matches the user's exported Stitch design system (sharp 0px geometry,
 rectangular toggles with square thumbs, layered charcoal surfaces, cyan section
@@ -27,7 +27,7 @@ def _lerp(a: QtGui.QColor, b: QtGui.QColor, t: float) -> QtGui.QColor:
 class SectionHeader(QtWidgets.QWidget):
     """A 4px accent tick + uppercase mono label, optional right-aligned tag.
 
-    The label is colored (`color`, default cyan) — control-panel sections are
+    The label is colored (`color`, default cyan), control-panel sections are
     cyan; the colored HUD headers pass DANGER / GOLD / ACCENT."""
 
     def __init__(self, text: str, color: str | None = None,

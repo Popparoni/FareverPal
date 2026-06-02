@@ -1,10 +1,10 @@
-"""Auto-attach decision logic — a tiny pure state machine.
+"""Auto-attach decision logic, a tiny pure state machine.
 
 The UI polls (running pid, attached pid, located?, busy) on a timer and asks
 this controller what to do. Keeping the *decision* here (no Qt, no I/O) means it
 unit-tests without the game running; the UI just executes the returned action.
 
-Attach/detach is fully automatic — there are no buttons or toggle in the UI — so
+Attach/detach is fully automatic, there are no buttons or toggle in the UI, so
 this is the whole policy: attach when the game opens, relocate until the player
 is in-world, detach when it closes or restarts. It only ever returns one of the
 existing read-only actions (attach / locate / detach); it adds no memory access.

@@ -1,6 +1,6 @@
 """Thin client for the Farever Pal web API (farever-pals.com).
 
-Pure + blocking (stdlib urllib, no extra dependency) — callers run it off the Qt
+Pure + blocking (stdlib urllib, no extra dependency), callers run it off the Qt
 thread. Every method returns the decoded JSON dict; on any failure it returns
 {"ok": False, "error": ...} rather than raising, so the UI can stay simple.
 """
@@ -142,7 +142,7 @@ _OAUTH_ERR_HTML = (
 def oauth_login(base_url: str, provider: str, timeout: float = 180.0) -> dict:
     """Run the browser OAuth flow for `provider` ('google'|'discord').
 
-    Returns {ok: True, token} on success, else {ok: False, error}. Blocking —
+    Returns {ok: True, token} on success, else {ok: False, error}. Blocking -
     call off the UI thread.
     """
     base = (base_url or "https://farever-pals.com").rstrip("/")
@@ -154,7 +154,7 @@ def oauth_login(base_url: str, provider: str, timeout: float = 180.0) -> dict:
         def do_GET(self):  # noqa: N802 (stdlib name)
             params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             if (params.get("state") or [""])[0] != state:
-                # favicon / stray hit — ignore, keep waiting for the real callback
+                # favicon / stray hit - ignore, keep waiting for the real callback
                 self.send_response(204)
                 self.end_headers()
                 return
@@ -195,3 +195,29 @@ def oauth_login(base_url: str, provider: str, timeout: float = 180.0) -> dict:
     if result.get("token"):
         return {"ok": True, "token": result["token"]}
     return {"ok": False, "error": result.get("error", "oauth")}
+
+
+def login_with_profile(base_url: str, username: str, password: str) -> dict:
+    api = FareverAPI(base_url)
+    res = api.login(username, password)
+    if res.get("ok") and res.get("token"):
+        me = FareverAPI(base_url, res["token"]).me()
+        if me.get("ok") and isinstance(me.get("user"), dict):
+            res["user"] = {**res.get("user", {}), **me["user"]}
+    return res
+
+
+def oauth_with_profile(base_url: str, provider: str) -> dict:
+    res = oauth_login(base_url, provider)
+    if res.get("ok") and res.get("token"):
+        me = FareverAPI(base_url, res["token"]).me()
+        if me.get("ok") and isinstance(me.get("user"), dict):
+            res["user"] = me["user"]
+    return res
+
+
+def presence_and_friends(base_url: str, token: str, share: bool) -> dict:
+    api = FareverAPI(base_url, token)
+    api.presence_ping(share)
+    res = api.friends_list()
+    return res if isinstance(res, dict) else {"ok": False}

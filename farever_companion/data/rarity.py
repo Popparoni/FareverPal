@@ -1,11 +1,8 @@
 """Rarity-promotion model for upgrade-voucher and equipment loot.
 
-Many loot tables drop an `Upgrade<Tier>` voucher (type=Misc, rarity=floor tier)
-or a piece of equipment whose rarity is rolled at drop time. The roll is a
-single weighted pick from `rarity.props.generationChance` for the player's level
-bracket, floored at the voucher's tier (sub-floor weight folds up — UpgradeRare
-can't produce Uncommon). This turns a voucher/equipment + level into the
-blue/purple/orange distribution the player actually cares about.
+A dropped Upgrade<Tier> voucher or rolled-rarity equipment has its rarity picked
+at drop time: a single weighted pick from rarity.props.generationChance for the
+level bracket, floored at the voucher's tier (sub-floor weight folds up).
 """
 from __future__ import annotations
 

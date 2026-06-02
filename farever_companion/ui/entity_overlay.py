@@ -1,6 +1,6 @@
 """Entity overlay + a separate Drop Table window (Tactical Overlay HUD).
 
-The entity HUD lists nearby enemies (selectable with ↑/↓ or click) and chests —
+The entity HUD lists nearby enemies (selectable with ↑/↓ or click) and chests -
 short, no endless scrolling. Selecting an enemy opens a separate, closable
 **Drop Table** window showing that target's full predicted loot (rarity-grouped,
 collapsible; class-usable items starred). If the selected target leaves range we
@@ -153,7 +153,7 @@ def _scroll_body():
 
 
 # ---------------------------------------------------------------------------
-#  Drop Table — its own closable window for the selected target's loot
+#  Drop Table - its own closable window for the selected target's loot
 # ---------------------------------------------------------------------------
 class DropTableOverlay(OverlayWindow):
     def __init__(self, model, settings, parent=None):
@@ -170,7 +170,7 @@ class DropTableOverlay(OverlayWindow):
         self.content.addWidget(scroll, 1)
         # Wider than the entity HUD: drop rows carry long item names AND a long
         # right-side value ("Σ 0.001% · 1 · ★1"), plus the header shows the full
-        # target name + "Nm · Ln" tag — at 320 the right side clipped.
+        # target name + "Nm · Ln" tag - at 320 the right side clipped.
         self._base_w, self._base_h = 392, 480
         self.setMinimumWidth(360)
         self.resize(392, 480)
@@ -249,7 +249,7 @@ class DropTableOverlay(OverlayWindow):
 
 
 # ---------------------------------------------------------------------------
-#  Entity HUD — nearby enemies (selectable) + chests
+#  Entity HUD - nearby enemies (selectable) + chests
 # ---------------------------------------------------------------------------
 class EntityOverlay(OverlayWindow):
     request_config = QtCore.Signal()

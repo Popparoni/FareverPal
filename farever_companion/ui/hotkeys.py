@@ -130,7 +130,7 @@ class GlobalHotkeys(QtCore.QObject):
         if self._u32 is not None:
             # Two Win32/Qt gotchas, both required for global hotkeys to fire:
             #  1. RegisterHotKey(NULL) posts WM_HOTKEY as a *thread* message Qt's
-            #     native filter never sees — bind to a real (hidden) window HWND.
+            #     native filter never sees - bind to a real (hidden) window HWND.
             #  2. The filter must be a standalone QAbstractNativeEventFilter
             #     (see _HotkeyFilter); installNativeEventFilter does NOT take
             #     ownership, so keep a reference.

@@ -1,4 +1,4 @@
-"""Shared per-skill table widgets — used by the Skills panel (and the DPS meter's
+"""Shared per-skill table widgets, used by the Skills panel (and the DPS meter's
 fallback). One row = icon + responsive name + compact bar + value + toggleable
 mono columns. Kept here so the DPS-meter and Skills overlays don't duplicate it.
 """

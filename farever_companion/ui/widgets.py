@@ -1,4 +1,4 @@
-"""Shared UI components — the single source of the app's look.
+"""Shared UI components, the single source of the app's look.
 
 Every window builds from these so the design is consistent (the fix for the old
 tool's mismatched windows). Plain QWidgets + a little QPainter; styled by QSS

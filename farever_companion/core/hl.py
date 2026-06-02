@@ -1,6 +1,6 @@
 """HashLink runtime reflection over the live process (read-only).
 
-Every Haxe→HashLink heap object carries its runtime type, so we read class
+Every Haxe->HashLink heap object carries its runtime type, so we read class
 names, super-chains, strings and arrays straight from memory. Object model
 (HL 64-bit, validated 2026-05; array layout = post-2026-05-21 patch):
 
@@ -55,8 +55,7 @@ class Hl:
         p = struct.unpack("<Q", v)[0]
         return p if is_ptr(p) else None
 
-    # The native backend raises OSError on a bad read; normalise to ProcError
-    # so the many `except ProcError` guards below (and in callers) catch it.
+    # normalise native OSError to ProcError for the guards below
     def u64(self, addr: int) -> int:
         try:
             return self.proc.u64(addr)
@@ -131,15 +130,11 @@ class Hl:
         return names
 
     def is_a(self, instance: int, ancestor: str) -> bool:
-        """True if `instance`'s class is, or descends from, `ancestor`.
-        This is the fix for the old boss-HP bug (exact-class match missed
-        Foe subclasses)."""
+        """True if `instance`'s class is, or descends from, `ancestor`."""
         return ancestor in self.super_chain(instance)
 
     def ancestors(self, type_ptr: int | None) -> frozenset[str]:
-        """Cached set of class names in a TYPE's super-chain (incl. itself).
-        Keyed by type pointer, so classifying many instances of the same type
-        per frame costs one walk total."""
+        """Class names in a type's super-chain (incl. itself), cached by type ptr."""
         if not is_ptr(type_ptr):
             return frozenset()
         cached = self._anc_cache.get(type_ptr)
@@ -166,10 +161,7 @@ class Hl:
         return ancestor in self.ancestors(type_ptr)
 
     def field_names(self, type_ptr: int) -> list[str]:
-        """Declared field names of an object type (own fields only), in order.
-        Reliable from hl_obj_field; byte offsets need live calibration (the
-        runtime object's fields_indexes), which is why the readers in core/ use
-        named, live-validated byte offsets rather than deriving them here."""
+        """Declared field names of an object type (own fields only), in order."""
         if not is_ptr(type_ptr):
             return []
         try:

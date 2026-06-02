@@ -1,4 +1,4 @@
-"""The "Tactical Overlay" design system — one palette + one stylesheet (QSS).
+"""The "Tactical Overlay" design system, one palette + one stylesheet (QSS).
 
 Tokens are taken verbatim from the user's exported Stitch design system
 (`stitch_farever_companion_gaming_utility/tactical_overlay_design_system/
@@ -18,7 +18,7 @@ PANEL_LOW = "#171c20"   # cells (toggles, steppers, inputs containers)
 PANEL = "#1b2024"       # cards, top bar (surface-container)
 PANEL_HI = "#252b2e"    # hover / high container
 HIGHEST = "#303539"     # active nav bg, icon boxes (surface-container-highest)
-BORDER = "#3e484f"      # outline-variant — the structural border everywhere
+BORDER = "#3e484f"      # outline-variant - the structural border everywhere
 
 # text
 TEXT = "#dee3e8"        # on-surface
@@ -26,10 +26,10 @@ MUTED = "#bdc8d1"       # on-surface-variant (labels, descriptions)
 DIM = "#87929a"         # outline (very muted: coord baselines, etc.)
 
 # accents
-ACCENT = "#38bdf8"      # primary-container — buttons, toggles, ticks, active borders
-ACCENT_LIGHT = "#8ed5ff"  # primary — active nav text/icon, sparkline
-ON_ACCENT = "#004965"   # on-primary-container — text on cyan buttons
-TOGGLE_THUMB_ON = "#00354a"  # on-primary — dark thumb on an active (cyan) toggle
+ACCENT = "#38bdf8"      # primary-container - buttons, toggles, ticks, active borders
+ACCENT_LIGHT = "#8ed5ff"  # primary - active nav text/icon, sparkline
+ON_ACCENT = "#004965"   # on-primary-container - text on cyan buttons
+TOGGLE_THUMB_ON = "#00354a"  # on-primary - dark thumb on an active (cyan) toggle
 ACCENT_DIM = "#13384a"  # cyan tint for selection backgrounds
 # the hand-tuned default accent shades; set_accent restores them exactly when the
 # user picks the design cyan rather than re-deriving. Order matches the globals
@@ -39,7 +39,7 @@ _DESIGN_ACCENT = (ACCENT, ACCENT_LIGHT, ACCENT_DIM, ON_ACCENT, TOGGLE_THUMB_ON)
 GOLD = "#eac331"        # secondary
 ORANGE = "#f1a02b"      # tertiary-container
 NEUTRAL = DIM
-DANGER = "#ffb4ab"      # error — enemy / big DPS number
+DANGER = "#ffb4ab"      # error - enemy / big DPS number
 GOOD = "#4ade80"        # success
 CHEST = GOLD
 
@@ -248,7 +248,7 @@ QSS = _build_qss()
 def set_accent(color: str) -> None:
     """Switch the app-wide accent ("Highlight color") to `color`, deriving the
     light/dim shades and rebuilding `QSS`. The caller must then re-apply
-    `QSS` (app.setStyleSheet) and refresh painted widgets — see
+    `QSS` (app.setStyleSheet) and refresh painted widgets, see
     ControlPanel._set_accent. Passing the default restores the design cyan."""
     global ACCENT, ACCENT_LIGHT, ACCENT_DIM, ON_ACCENT, TOGGLE_THUMB_ON, QSS
     if not color:
@@ -282,7 +282,7 @@ def _shade(hex_color: str, factor: float) -> str:
 
 def scaled_qss(scale: float) -> str:
     """Per-overlay widget stylesheet: the current `QSS` (already tinted to the
-    active accent) with every `Npx` metric multiplied by `scale` — a uniform
+    active accent) with every `Npx` metric multiplied by `scale`, a uniform
     zoom so one HUD can scale without touching the others. Returns "" at scale
     1.0 so the overlay just inherits the (tinted) app QSS."""
     if abs(scale - 1.0) < 0.01:

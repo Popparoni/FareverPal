@@ -9,7 +9,7 @@ project:
 
 In a PyInstaller one-file build these are copied next to the bundle; we check
 the frozen `_MEIPASS` dir first, then fall back to walking up to the repo root.
-Every module imports its data location from here — one place to change.
+Every module imports its data location from here, one place to change.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Skills panel — the per-skill damage breakdown, split out from the DPS meter.
+"""Skills panel, the per-skill damage breakdown, split out from the DPS meter.
 
 One combined, sortable table (icon + real skill name + bar + toggleable columns:
 %, DPS, hits, crit%, max, avg, min) with DMG / HEAL / SHIELD tabs. Replaces the
@@ -90,7 +90,7 @@ class SkillOverlay(OverlayWindow):
         self.content.addWidget(self.summary)
 
         # Honesty caption: per-skill capture reads the live floating DamageDisplay
-        # numbers, which are scattered across the GC heap — coverage is incomplete
+        # numbers, which are scattered across the GC heap - coverage is incomplete
         # under heavy multi-hit / status-effect load (measured ~30% of live numbers
         # at peak). The headline DPS + by-enemy view are exact (HP-diff); this
         # per-skill table is a representative SAMPLE. Marked experimental until the
@@ -203,7 +203,7 @@ class SkillOverlay(OverlayWindow):
         except Exception as e:
             self.summary.setText(f"err: {e}")
             return
-        # The Skill panel is per-skill ONLY (DamageDisplay events) — the HP-diff
+        # The Skill panel is per-skill ONLY (DamageDisplay events) - the HP-diff
         # by-enemy view lives in the DPS meter now. Read the dedicated events meter.
         m = getattr(self.model, "dps_events", None) or self.model.dps
         accent = self.s.hud_accent

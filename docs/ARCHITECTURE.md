@@ -108,10 +108,14 @@ and two extracted managers it delegates to:
   and its own event meter). HP-diff stays the always-on fallback.
 
 Each tick `LiveModel` produces the data the views need (nearest enemies, nearest
-chests + resolved loot tables, combat sample). It's where the bug-fix invariants
-live: bosses are tracked regardless of distance; chest loot tables are resolved
+chests + resolved loot tables, combat sample). It's where the invariants live:
+bosses are tracked regardless of distance; chest loot tables are resolved
 deterministically and cached so they don't flicker. Shared layout offsets live in
 one place, `core/constants.py`, imported by every reader.
+
+`LiveModel` is a coordinator, not a dumping ground: a new live feature gets its own
+delegate (like `ChestResolver` / `DamageSourceManager`) rather than another method
+here.
 
 ### `data/` — static, process-free
 Everything derived from the game's CastleDB (`.cdb`) tables: the recursive loot
@@ -123,8 +127,8 @@ One design system (`theme.py` + shared widgets in `widgets.py`): dark, flat,
 **sharp corners**, cyan accent. Overlays subclass `overlay_base.py` (frameless,
 translucent, always-on-top, click-through). Every view reads from `LiveModel`.
 
-`control_panel.py` is the main window (nav rail + stacked pages). It stays a thin
-view by delegating two concerns to dedicated `QObject`s it drives via signals:
+`control_panel.py` is the main window: the shell only (nav rail, stacked pages,
+status strip, settings sync). It delegates every other concern:
 - `ui/game_attach.py` — `GameAttachmentController`: the read-only session
   lifecycle (the `Proc` handle, the `LiveModel`, the locate worker, and the 2 s
   auto-attach watcher). It holds no UI; it emits `status` / `log` / `locating` /
@@ -132,6 +136,12 @@ view by delegating two concerns to dedicated `QObject`s it drives via signals:
 - `ui/overlay_manager.py` — `OverlayManager`: the overlay windows + their toggle
   cards, plus global opacity/lock. The panel exposes `self.proc` / `self.model` /
   `self.overlays` as properties onto these two, so the page builders are unchanged.
+- Each page is a mixin in its own file: `ui/pages/{overlays,entity,combat,loot,
+  crosshair,map_page,log}.py`, plus `ui/account.py`, `ui/friends_page.py`,
+  `ui/speedrun_page.py`. `ControlPanel` composes them. One generic
+  `ui/workers.py:CallWorker` runs any off-thread API call. `tests/test_ui_layering.py`
+  enforces a per-file line budget (so the panel can't reabsorb a concern) and that
+  page modules import no memory layer.
 
 **Boundary:** `ui/` never reads the process directly — no `.read()` / `.u64()` /
 `.find_bytes()` calls; it only consumes `LiveModel`. Importing `Proc` to *attach*

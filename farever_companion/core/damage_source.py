@@ -1,18 +1,9 @@
-"""Per-skill DamageDisplay source — lifecycle + calibration (OPT-IN, experimental).
+"""Per-skill DamageDisplay source: lifecycle + calibration (opt-in, experimental).
 
-Pulled out of LiveModel: the DamageReader creation, the slow background
-type-locate + GC-cluster mapping, the off-thread poller, and the per-skill event
-meter are a self-contained subsystem. LiveModel owns the always-on HP-diff meter
-(`self.dps`) and just feeds this manager a per-tick "am I in combat" signal; the
-manager owns everything per-skill (`self.dps_events`).
-
-Per-skill is gated behind the experimental flag (release builds hide it —
-incomplete coverage + slow calibration). Even if `dps_per_skill` is set, it stays
-off without the flag. The display objects are transient (~1s) with no shared
-parent container, so we exploit HashLink's non-moving, size-class-segregated GC:
-every live DamageDisplay clusters in the same handful of GC pages, so one slow
-full scan locates the cluster and every tick re-scans ONLY those ranges. HP-diff
-stays the fallback whenever this isn't calibrated.
+Owns the DamageReader, the slow background type-locate + GC-cluster mapping, the
+off-thread poller, and the per-skill event meter (self.dps_events). LiveModel
+keeps the always-on HP-diff meter and feeds this a per-tick in-combat signal.
+Gated behind the experimental flag; HP-diff is the fallback when uncalibrated.
 """
 from __future__ import annotations
 
@@ -65,7 +56,7 @@ class DamageSourceManager:
 
     # --- status / progress (drive the Skills panel hints) ----------------
     def status(self) -> str:
-        """'active' | 'scanning' | 'off' — drives the meter's 'calibrating' hint.
+        """'active' | 'scanning' | 'off', drives the meter's 'calibrating' hint.
         'off' = uncalibrated or no scan backend; 'scanning' = the type-locate /
         cluster mapping is running; 'active' = the cluster ranges are ready."""
         from .damage import DamageReader
@@ -99,7 +90,7 @@ class DamageSourceManager:
     def recalibrate(self) -> None:
         """User-triggered: re-map the per-skill cluster NOW (attack while it runs).
         Wakes the maintenance thread to re-derive the GC ranges against the live
-        DamageDisplay instances on screen — so a cluster that mapped during a lull
+        DamageDisplay instances on screen, so a cluster that mapped during a lull
         (no numbers) is fixed without waiting for the auto self-heal. No-op until
         per-skill is enabled + the type is located."""
         self._start_type_scan()      # ensure the maintenance thread exists
@@ -107,7 +98,7 @@ class DamageSourceManager:
 
     # --- the reader + its background threads -----------------------------
     def _source(self, player_addr: int | None):
-        """The per-skill DamageDisplay reader — OPT-IN only (`per_skill_enabled`).
+        """The per-skill DamageDisplay reader, OPT-IN only (`per_skill_enabled`).
         Returns the reader once its cluster ranges are derived (else None -> the
         caller stays on HP-diff in the meantime)."""
         if not self.per_skill_enabled:
@@ -161,7 +152,7 @@ class DamageSourceManager:
         """Run `src.poll()` on a BACKGROUND thread, feeding events into a queue
         the UI thread drains. poll() is a RANGE-BOUNDED scan (only the GC
         size-class pages the cluster occupies, ~tens of MB -> sub-100ms), not a
-        full-heap sweep — but it still lives off the UI thread so a slow read can
+        full-heap sweep, but it still lives off the UI thread so a slow read can
         never stall a frame, and so it can poll fast enough to catch ~1s numbers."""
         if self._poller_started:
             return
@@ -197,7 +188,7 @@ class DamageSourceManager:
                     last_report = now2
                 # Poll FAST throughout a fight: a number lives ~1s, so 0.08s polling
                 # catches each one ~12x (never missed) as long as the cluster covers
-                # it. The OLD idle ramp-up to 2.5s was the stutter cause — it slept
+                # it. The OLD idle ramp-up to 2.5s was the stutter cause - it slept
                 # through the start of the next burst, dropping skills. poll() is
                 # cheap now (range-bounded), so stay tight while events flowed within
                 # the last 3s, and only back off after a real lull (saves CPU).

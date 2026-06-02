@@ -1,29 +1,22 @@
-"""GameApp-singleton anchor — (nearly) scan-free, session-stable player locate.
+"""GameApp-singleton anchor: scan-free, session-stable player locate.
 
-Instead of scanning the multi-GB heap for `ent.Hero` instances every zone change
-(slow, and needs disambiguating the local player from network proxies), we
-anchor on the **GameApp singleton** and pointer-chase to the local Hero. Once the
-anchor is resolved it is cached and stays valid for the whole session — `hero()`
-just re-reads a field, following character/zone changes for free.
+Anchor on the GameApp singleton and pointer-chase to the local Hero, instead of
+scanning the heap for ent.Hero every zone change. The anchor is cached for the
+session; hero() then just re-reads a field, following character/zone changes.
 
-The chain, validated live (2026-06-02, see _diag_globalvalue.py):
+The chain, validated live 2026-06-02:
 
     GameApp hl_type --(super, +0x18)--> App hl_type
     App hl_type_obj --(global_value, +0x38)--> &globals_data slot for $App
         *slot --> $App static object
             .inst (a GameApp)            == App.inst, the singleton
-                GameApp.hero  : ent.Hero      <- THE local player
+                GameApp.hero  : ent.Hero      <- the local player
                 GameApp.me    : st.Player
                 GameApp.layer : st.GameLayer
 
-Everything past the GameApp *type* is a field read — no heap scan. The only scan
-is finding the GameApp type once: a single full pass for the UTF-16 class name,
-then a tiny region-bounded pass for the type_obj that references it. Read-only
-throughout; the app never writes to the game.
-
-In-object field offsets (inst, hero, me, layer) and the global_value offset are
-validated against this build but re-resolved live **by class name** so they
-survive patches; resolved values are cached and logged.
+The only scan is finding the GameApp type once (one pass for the class name, then
+a region-bounded pass for its type_obj). Offsets are re-resolved by class name so
+they survive patches; resolved values are cached.
 """
 from __future__ import annotations
 
@@ -66,9 +59,9 @@ class GameAppLocator:
     # in the address space (~0x2aa47… in this build) and are hot (in the working
     # set), whereas the multi-GB GC object heap sits higher and is largely paged
     # out. So we walk regions ASCENDING, scan only writable ones, and early-exit
-    # the moment the chain validates — we never touch the cold heap. Big regions
+    # the moment the chain validates - we never touch the cold heap. Big regions
     # are skipped during the name search (type-name pools are small).
-    _MAX_NAME_REGION = 0x4000000   # 64 MB — metadata regions are far smaller
+    _MAX_NAME_REGION = 0x4000000   # 64 MB - metadata regions are far smaller
 
     def _committed_ranges_near(self, addr: int, span: int = 0x1000000
                                ) -> list[tuple[int, int]]:
@@ -83,7 +76,7 @@ class GameAppLocator:
         return out
 
     def _typeobj_candidates(self, name_addr: int) -> list[int]:
-        """Every structure with a pointer to `name_addr` at +0x10 — candidate
+        """Every structure with a pointer to `name_addr` at +0x10, candidate
         hl_type_objs. Several spots reference a type-name string, so this is just
         a candidate set; the real one is decided by running the chain."""
         out = []
@@ -172,7 +165,7 @@ class GameAppLocator:
             return None
         # commit. `static_obj` is a globals_data slot (stable for the process), so
         # cache it: re-reading `static_obj + off_inst` each frame yields the CURRENT
-        # singleton, which the game RECREATES on a world reload — so caching the
+        # singleton, which the game RECREATES on a world reload - so caching the
         # singleton itself would go stale, but the static slot does not.
         self._gameapp_obj = gameapp_obj
         self._static_obj = static_obj
@@ -207,7 +200,7 @@ class GameAppLocator:
     @property
     def anchored(self) -> bool:
         """True once the stable `$App` static slot + the inst/hero offsets are
-        resolved — i.e. we can re-resolve the current singleton on demand without
+        resolved, i.e. we can re-resolve the current singleton on demand without
         a scan."""
         return (self._static_obj is not None and self.off_inst is not None
                 and self.off_hero is not None)
@@ -223,7 +216,7 @@ class GameAppLocator:
         with NO scan. Re-reading `$App.inst` each call follows a singleton the
         game RECREATES on a world reload (caching the singleton would go stale);
         re-reading `.hero` follows a character change. Returns None when not yet
-        anchored, or when there's no live hero right now (main menu / loading) —
+        anchored, or when there's no live hero right now (main menu / loading) -
         either because the singleton or the hero field is currently null."""
         if not self.anchored:
             return None

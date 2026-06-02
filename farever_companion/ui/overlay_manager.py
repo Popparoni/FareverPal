@@ -1,4 +1,4 @@
-"""Overlay window manager — owns the HUD overlay widgets + their open/close,
+"""Overlay window manager, owns the HUD overlay widgets + their open/close,
 global opacity/lock, and the toggle-cards that mirror each overlay's open state.
 
 Pulled out of ControlPanel: the panel registers each overlay toggle card and

@@ -1,13 +1,8 @@
-"""Process access — uniform interface over the Rust reader (preferred) or
-pymem (fallback).
+"""Read-only process access over the Rust reader (preferred) or pymem (fallback).
 
-The Rust `farever_native.Reader` is the primary backend: it offers batched reads
-(`read_many`) and a fast `find_bytes` scan that the pure-read player locator
-needs. If the extension isn't built, we fall back to pymem for basic reads; the
-scan-dependent features (player locate) then require building the extension.
-
-All access is read-only: the handle is opened without write rights and the
-backend exposes no write primitive — the app only ever reads the game.
+The Rust backend adds batched reads and a fast scan that the player locator
+needs; pymem covers basic reads only. The handle is opened without write rights
+and no backend exposes a write primitive.
 """
 from __future__ import annotations
 

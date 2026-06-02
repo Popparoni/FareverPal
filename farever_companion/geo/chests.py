@@ -5,7 +5,7 @@ prefabs by the old tool) for positions, and `notes/chest_loot_index.json` for
 loot-table resolution of dynamic/instance chests not in the position cache.
 
 Coordinates are global world XYZ, 1:1 with the runtime player struct (verified
-live in the old project). Pure data — no attached process.
+live in the old project). Pure data, no attached process.
 """
 from __future__ import annotations
 

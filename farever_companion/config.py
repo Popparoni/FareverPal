@@ -15,11 +15,11 @@ def experimental_enabled() -> bool:
     """Dev/hidden gate for in-progress features kept OUT of release builds.
 
     Currently gates the per-skill **Skill Breakdown**: it's read-only-honest but
-    incomplete (samples the scattered live DamageDisplay numbers — ~30% coverage
+    incomplete (samples the scattered live DamageDisplay numbers, ~30% coverage
     under heavy load) and slow to calibrate (~5 min cold type-locate), so it isn't
     shipped to normal users. The exact features (headline DPS, by-enemy, the
     survivability strip) are unaffected and always on. All the per-skill code stays
-    in-tree — set FAREVER_EXPERIMENTAL=1 to expose it (e.g. for dev / once the GC
+    in-tree, set FAREVER_EXPERIMENTAL=1 to expose it (e.g. for dev / once the GC
     page-walk makes it accurate + fast). See core/damage_source.py.
     """
     return os.environ.get("FAREVER_EXPERIMENTAL", "").strip().lower() not in (
@@ -52,7 +52,7 @@ class Settings:
     ui_scale: float = 1.0
     click_through: bool = False
     lock_overlays: bool = False      # lock HUD position + make click-through (mouse passes to game)
-    auto_attach: bool = True         # watch for Farever.exe → attach/locate/detach with zero clicks
+    auto_attach: bool = True         # watch for Farever.exe -> attach/locate/detach with zero clicks
     auto_check_updates: bool = True  # check GitHub Releases (via the website) for a newer exe on startup
     entity_scale: float = 1.0        # per-overlay UI zoom
     dps_scale: float = 1.0
@@ -111,13 +111,13 @@ class Settings:
     hotkey_loot_prev: str = "Ctrl+Alt+Z"        # select previous target
     hotkey_loot_next: str = "Ctrl+Alt+X"        # select next target
     hotkey_loot_close: str = "Ctrl+Alt+C"       # close the drop-table window
-    # (avoid Ctrl+Alt+Arrows — those rotate the screen on many GPUs)
+    # (avoid Ctrl+Alt+Arrows - those rotate the screen on many GPUs)
     # speedrun timer
     hotkey_speedrun_toggle: str = "Ctrl+Alt+T"   # start / stop the run timer
     hotkey_speedrun_reset: str = "Ctrl+Alt+R"    # reset to 00:00
     speedrun_scale: float = 1.0
     speedrun_best: dict = field(default_factory=dict)  # boss unit_id -> best seconds
-    # speedrun automation — ONE master toggle: detect the dungeon (boss in scene),
+    # speedrun automation - ONE master toggle: detect the dungeon (boss in scene),
     # auto-start the timer on the player's first move, auto-stop on boss kill, AND
     # auto-detect the Normal/Hard difficulty from the live boss level (Hard scales
     # the dungeon to lvl 20, so live boss level > its normal level = Hard).
@@ -127,11 +127,11 @@ class Settings:
     speedrun_auto_upload: bool = False
     # difficulty finished runs are uploaded as ("normal" | "hard"). Used as the
     # FALLBACK when Auto Detect Boss Run is off, or when the live boss level can't
-    # be read (offset uncalibrated). Defaults to hard — the difficulty most
+    # be read (offset uncalibrated). Defaults to hard - the difficulty most
     # speedruns are run on.
     speedrun_mode: str = "hard"
     # After a finished run, auto re-arm for the next one (back-to-back) without
-    # the user clicking reset — re-arms once they leave the dungeon or after a
+    # the user clicking reset - re-arms once they leave the dungeon or after a
     # short grace. Off = the finished time stays until manually reset.
     speedrun_auto_rearm: bool = True
     # Per-run build override. When OFF (default) an uploaded run links the build

@@ -12,7 +12,7 @@ import time
 
 
 def fmt_time(secs: float) -> str:
-    """`mm:ss.cs` (centiseconds) — the speedrun-readable format."""
+    """`mm:ss.cs` (centiseconds), the speedrun-readable format."""
     secs = max(0.0, secs)
     m = int(secs // 60)
     s = secs - m * 60
@@ -27,8 +27,8 @@ class SpeedrunTimer:
 
     # A vanished boss counts as a KILL only if its last-seen HP was within this
     # fraction of the max HP we observed (i.e. it was at death's door). A boss
-    # that disappears while still healthy means the PLAYER left — leaving the
-    # dungeon / going to the main menu despawns the boss at full HP — so that is
+    # that disappears while still healthy means the PLAYER left - leaving the
+    # dungeon / going to the main menu despawns the boss at full HP - so that is
     # an aborted run, never a kill. (Bias is deliberately toward missing an
     # auto-stop, which the user can finish by hand, over uploading a non-kill.)
     KILL_HP_FRAC = 0.05
@@ -89,11 +89,11 @@ class SpeedrunTimer:
     # --- auto-stop on boss kill -----------------------------------------
     def feed_boss(self, boss_id: str | None, present: bool, hp: float | None) -> str:
         """Update boss tracking for the active run. Returns:
-          KILL  — the tracked boss just died (auto-stops the timer, kill=True),
-          LEFT  — the boss vanished while still healthy ⇒ the player left the
+          KILL , the tracked boss just died (auto-stops the timer, kill=True),
+          LEFT , the boss vanished while still healthy => the player left the
                   dungeon / hit the main menu; the run must be cancelled, NOT
                   uploaded,
-          ALIVE — nothing conclusive yet (keep running).
+          ALIVE, nothing conclusive yet (keep running).
         Only ALIVE/KILL change the timer here; the caller handles LEFT."""
         if self.state != self.RUNNING:
             return self.ALIVE
@@ -112,7 +112,7 @@ class SpeedrunTimer:
         if not self._boss_seen_alive:
             return self.ALIVE
         # Despawned after being tracked: a KILL only if it was near death when
-        # last seen; otherwise the player left (full/high HP) — abort, no upload.
+        # last seen; otherwise the player left (full/high HP) - abort, no upload.
         if (self._last_hp is not None and self._max_hp > 0
                 and self._last_hp <= self._max_hp * self.KILL_HP_FRAC):
             self.stop(kill=True)
@@ -123,7 +123,7 @@ class SpeedrunTimer:
 class AutoStarter:
     """Decides when a run auto-starts: pure, headless, unit-testable.
 
-    Fed `(in_dungeon, pos)` once per overlay tick, it returns True exactly once —
+    Fed `(in_dungeon, pos)` once per overlay tick, it returns True exactly once -
     on the tick the player makes *real* movement away from a settled spawn
     baseline. Separated from the overlay (which only does I/O) so the start
     behaviour can be tested without the game or Qt.
@@ -134,7 +134,7 @@ class AutoStarter:
     jitter could exceed the move threshold and trip the timer "on enter" some
     runs but not others (the inconsistency Hooch reported). We instead wait until
     the player has been essentially stationary for a few consecutive ticks, then
-    baseline *that* resting spawn point — so only deliberate walking starts the
+    baseline *that* resting spawn point, so only deliberate walking starts the
     run, every time.
     """
 
@@ -144,7 +144,7 @@ class AutoStarter:
     # you spawn slightly above the floor and settle down a couple of units over
     # ~1s. Each tick of that drop is a tiny step (well under any per-tick epsilon),
     # so the old per-tick test counted the fall as 'still', baselined mid-fall, and
-    # then the remaining settle crossed the move threshold — a false start with no
+    # then the remaining settle crossed the move threshold - a false start with no
     # real input. Anchored distance grows as the fall continues, so it never
     # settles until the landing actually stops. (Trace: X/Y fixed, Z 17.4->15.2.)
     SETTLE_EPS = 0.6        # radius (from the streak anchor) that still counts as "still"
@@ -163,7 +163,7 @@ class AutoStarter:
 
     @staticmethod
     def _dist(a, b) -> float:
-        # HORIZONTAL (ground-plane x,y) distance only — deliberately ignore the
+        # HORIZONTAL (ground-plane x,y) distance only - deliberately ignore the
         # vertical axis. The teleport-in LANDING settles the player downward by a
         # couple of units in the 3rd coord while x,y stay fixed (observed:
         # (-98.8,347.8,17.4)->(-98.8,347.8,15.2)); counting that as movement was
@@ -173,7 +173,7 @@ class AutoStarter:
 
     def feed(self, in_dungeon: bool, pos) -> bool:
         """Return True on the tick a real run-start movement is detected."""
-        # Outside a dungeon (or no position yet) → disarm; never start in town.
+        # Outside a dungeon (or no position yet) -> disarm; never start in town.
         if not in_dungeon or not pos:
             self.reset()
             return False
@@ -203,10 +203,10 @@ class AutoStarter:
                 if self._settle >= self.SETTLE_TICKS:
                     self._base = pos
             else:
-                self._anchor = pos      # drifted out → restart the streak here
+                self._anchor = pos      # drifted out -> restart the streak here
                 self._settle = 0
             return False
-        # Baseline established → deliberate movement away from it starts the run.
+        # Baseline established -> deliberate movement away from it starts the run.
         if self._dist(pos, self._base) >= self.MOVE_THRESHOLD:
             self.reset()
             return True
@@ -217,7 +217,7 @@ class ModeLatch:
     """Latches the last confidently auto-detected difficulty *during* a run.
 
     The Normal↔Hard mixups Hooch saw came from resolving difficulty at the
-    finish frame — the exact moment the boss dies/despawns, when its level is
+    finish frame, the exact moment the boss dies/despawns, when its level is
     flaky or unreadable, so it fell back to the manual selector (often the wrong
     one). The boss's level is reliable while it's alive and fighting, so we
     observe it every tick of the run and remember the last good *auto* read. At

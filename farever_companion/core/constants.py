@@ -7,7 +7,7 @@ and resolved by class name through `hl.py` reflection where practical; the
 build-validated dates stay with the readers that document each group.
 
 Calibration-pending offsets (e.g. the per-skill level offset, the isMe path)
-stay as `None`-defaulted constants in their own module — they're not shared, so
+stay as `None`-defaulted constants in their own module, they're not shared, so
 they don't belong here.
 """
 from __future__ import annotations
@@ -45,6 +45,17 @@ UNIT_BLOCK = 0x258       # batched header read: type(0) .. unit-id(0x250)
 # st.GameLayer arrays
 OFF_UNITS_ARR = 0x128    # -> ArrayObj of ent.Hero / ent.Foe subclasses
 OFF_ELEMS_ARR = 0x120    # -> ArrayObj of interactibles (no units)
+
+# st.GameLayer.config {activityID:String, difficulty:Null<Int>, mapId:String}.
+# The config pointer's offset on GameLayer drifts between builds (seen at 0x470
+# and 0x508), so the reader discovers it: scan GameLayer for a pointer to a struct
+# whose mapId (config+0x10) is a String containing 'POI' (always true inside an
+# instance) and whose difficulty box (config+0x08) holds 0/1. difficulty is a
+# boxed Null<Int>: box+0x08 -> i32 (0=Normal, 1=Hard). Confirmed live 2026-06-02.
+OFF_CONFIG_DIFFICULTY = 0x08  # config -> difficulty (boxed Null<Int>)
+OFF_CONFIG_MAPID = 0x10       # config -> mapId String (validates the struct)
+OFF_BOX_VALUE = 0x08          # boxed Null<Int> -> i32 value
+CONFIG_SCAN_BYTES = 0x800     # how far into GameLayer to hunt the config pointer
 
 # interactible element fields
 OFF_ELEMID = 0x268       # element-id String

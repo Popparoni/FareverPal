@@ -1,7 +1,7 @@
 """Center-screen crosshair overlay (read-only, click-through).
 
 A frameless, translucent, always-on-top window pinned to the centre of the
-primary screen that draws a configurable crosshair. Purely cosmetic — it never
+primary screen that draws a configurable crosshair. Purely cosmetic, it never
 reads the game or takes input (always click-through). The same `paint` routine
 backs the live preview in the control panel.
 """
@@ -23,7 +23,7 @@ def paint(painter: QtGui.QPainter, cx: float, cy: float, s) -> None:
     dot = max(0, s.crosshair_dot)
 
     # T-Shape draws only the horizontal arms + the bottom (stem), omitting the
-    # top arm — a "⊤" so the target above the centre stays unobscured.
+    # top arm - a "⊤" so the target above the centre stays unobscured.
     arms = "rld" if style == "T-Shape" else "rldu"
 
     def draw_lines(pen_color, width):

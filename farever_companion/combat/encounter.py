@@ -1,13 +1,7 @@
-"""Encounter snapshots, personal-best parses, and export — pure + testable.
+"""Encounter snapshots, local personal bests, and CSV/JSON export.
 
-A "cycle" the DPS overlay already tracks becomes a named **Encounter** here: a
-frozen record of one fight (boss, duration, DPS/HPS/DTPS, kills, deaths, the
-per-skill table) that can be reviewed, compared to a local personal best, and
-exported to CSV/JSON for the wiki/datamining goal.
-
-No process reads, no Qt — fed a `DpsMeter` and a boss label, it produces plain
-data. Self-DPS only, client-reported (see CLAUDE.md); a best here is a *local*
-personal best, never a server-verified parse.
+Pure and testable: fed a DpsMeter and a boss label, freezes one fight into a
+plain record. Self-DPS only, client-reported; a best here is local, not verified.
 """
 from __future__ import annotations
 
