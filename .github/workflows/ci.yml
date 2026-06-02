@@ -40,7 +40,7 @@ jobs:
         run: pip install ./native
 
       - name: Run tests
-        run: pytest -v
+        run: python -m pytest -v
 
       - name: Package one-file exe
         run: pyinstaller --noconfirm FareverPal.spec
