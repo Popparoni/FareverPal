@@ -36,8 +36,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Build native extension (maturin develop)
-        run: python -m maturin develop --release -m native/Cargo.toml
+      - name: Build & install native extension (farever_native)
+        run: pip install ./native
 
       - name: Run tests
         run: pytest -v
