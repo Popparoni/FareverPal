@@ -1,0 +1,62 @@
+# --- Virtualenv (huge; recreate from requirements.txt) ---
+.venv/
+venv/
+env/
+
+# --- PyInstaller output ---
+# The one-file exe is ~305 MB and ships as a GitHub RELEASE ASSET, never in git
+# (GitHub rejects files >100 MB).
+dist/
+build/
+*.spec
+# ...but the committed FareverPal build spec IS tracked (single source of build
+# truth; prevents shipping a bundle built from uncommitted local state).
+!FareverPal.spec
+
+# --- Rust build output (farever_native) ---
+native/target/
+
+# --- Python caches / bytecode ---
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# --- Logs ---
+*.log
+
+# --- Secrets / credentials (none expected, but never commit these) ---
+.env
+.env.*
+*.pem
+*.key
+*.token
+credentials*
+secret*
+id_rsa*
+
+# --- Editor / OS cruft ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# --- internal / scratch (never publish) ---
+_re_*.py
+_diag_*.py
+_reflect_dump.txt
+*_dump.txt
+notes/
+PLAN.md
+*_PLAN.md
+docs/MEMORY_INTERNALS.md
+
+# --- AI assistant / internal docs (never publish) ---
+CLAUDE.md
+**/CLAUDE.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md
