@@ -143,9 +143,32 @@ class GameAppLocator:
                     break
         return out
 
+    def _resolve_fields(self, singleton: int) -> None:
+        """Resolve the hero/me/layer field offsets by class from a live singleton.
+        Only resolves offsets still unknown, so it's a cheap no-op once anchored;
+        one 0x400 read otherwise. At the main menu the hero field is null (no
+        instance to match), so off_hero stays None until the player loads in -
+        this is then re-attempted each call so the anchor self-heals in-world."""
+        wanted: dict[str, str] = {}
+        if self.off_hero is None:
+            wanted[CLS_HERO] = "hero"
+        if self.off_me is None:
+            wanted[CLS_PLAYER] = "me"
+        if self.off_layer is None:
+            wanted[CLS_LAYER] = "layer"
+        if not wanted:
+            return
+        found = self._scan_for_class(singleton, wanted)
+        self.off_hero = found.get("hero", self.off_hero)
+        self.off_me = found.get("me", self.off_me)
+        self.off_layer = found.get("layer", self.off_layer)
+
     def _try_chain(self, gameapp_obj: int) -> int | None:
-        """Full chain for one candidate type_obj -> validated GameApp singleton
-        (with hero/me/layer offsets resolved), or None."""
+        """Full chain for one candidate type_obj -> validated GameApp singleton,
+        or None. The chain (GameApp -> super App -> $App static -> .inst, whose
+        class must be GameApp) uniquely identifies the singleton WITHOUT needing
+        a hero, so it commits at the main menu too; the hero/me/layer offsets are
+        resolved opportunistically and may stay None until the player is in-world."""
         static_obj = self._static_app_obj_from(gameapp_obj)
         if static_obj is None:
             return None
@@ -156,13 +179,6 @@ class GameAppLocator:
         singleton = self._u64(static_obj + off_inst)
         if not is_ptr(singleton) or self.hl.class_of(singleton) != CLS_GAMEAPP:
             return None
-        fields = self._scan_for_class(singleton, {
-            CLS_HERO: "hero", CLS_PLAYER: "me", CLS_LAYER: "layer"})
-        if "hero" not in fields:
-            return None
-        hero = self._u64(singleton + fields["hero"])
-        if not is_ptr(hero) or self.hl.class_of(hero) != CLS_HERO:
-            return None
         # commit. `static_obj` is a globals_data slot (stable for the process), so
         # cache it: re-reading `static_obj + off_inst` each frame yields the CURRENT
         # singleton, which the game RECREATES on a world reload - so caching the
@@ -170,15 +186,14 @@ class GameAppLocator:
         self._gameapp_obj = gameapp_obj
         self._static_obj = static_obj
         self.off_inst = off_inst
-        self.off_hero = fields.get("hero")
-        self.off_me = fields.get("me")
-        self.off_layer = fields.get("layer")
+        self._resolve_fields(singleton)
         return singleton
 
     # --- locate ----------------------------------------------------------
     def locate(self) -> int | None:
         # cached singleton stays valid for the session
         if self._addr is not None and self.hl.class_of(self._addr) == CLS_GAMEAPP:
+            self._resolve_fields(self._addr)   # pick up the hero field once in-world
             return self._addr
         self._addr = None
         # fast path: we already know the right type_obj from a previous locate
@@ -188,7 +203,7 @@ class GameAppLocator:
                 self._addr = singleton
                 return singleton
             self._gameapp_obj = None
-        # cold path: find the type_obj whose chain yields a real Hero
+        # cold path: find the type_obj whose chain reaches the GameApp singleton
         for cand in self._iter_gameapp_type_objs():
             singleton = self._try_chain(cand)
             if singleton is not None:
@@ -198,15 +213,21 @@ class GameAppLocator:
 
     # --- reads (pure field follow, no scan) ------------------------------
     @property
+    def reachable(self) -> bool:
+        """True once the stable `$App` static slot + the inst offset are resolved,
+        i.e. we can re-resolve the live GameApp singleton on demand with no scan -
+        even at the main menu, before any hero exists. This is the signal to stop
+        the expensive heap-scan fallback: the chain is found, just wait in-world."""
+        return self._static_obj is not None and self.off_inst is not None
+
+    @property
     def anchored(self) -> bool:
-        """True once the stable `$App` static slot + the inst/hero offsets are
-        resolved, i.e. we can re-resolve the current singleton on demand without
-        a scan."""
-        return (self._static_obj is not None and self.off_inst is not None
-                and self.off_hero is not None)
+        """`reachable` AND the hero field offset is resolved, i.e. live_hero() can
+        actually read a hero. (Resolved the first time the player is in-world.)"""
+        return self.reachable and self.off_hero is not None
 
     def hero(self) -> int | None:
-        if not self.anchored:
+        if not self.reachable:
             if self.locate() is None:
                 return None
         return self.live_hero()
@@ -216,15 +237,21 @@ class GameAppLocator:
         with NO scan. Re-reading `$App.inst` each call follows a singleton the
         game RECREATES on a world reload (caching the singleton would go stale);
         re-reading `.hero` follows a character change. Returns None when not yet
-        anchored, or when there's no live hero right now (main menu / loading) -
-        either because the singleton or the hero field is currently null."""
-        if not self.anchored:
+        reachable, or when there's no live hero right now (main menu / loading) -
+        either because the singleton or the hero field is currently null. While
+        the hero offset is still unknown (only the menu has been seen) it's
+        re-resolved here, so the anchor self-heals the moment the player loads."""
+        if not self.reachable:
             return None
         singleton = self._u64(self._static_obj + self.off_inst)
         if not is_ptr(singleton) or self.hl.class_of(singleton) != CLS_GAMEAPP:
             self._addr = None
             return None
         self._addr = singleton                      # refresh cache for me()/layer()
+        if self.off_hero is None:
+            self._resolve_fields(singleton)         # self-heal once in-world
+            if self.off_hero is None:
+                return None
         hero = self._u64(singleton + self.off_hero)
         return hero if is_ptr(hero) else None
 

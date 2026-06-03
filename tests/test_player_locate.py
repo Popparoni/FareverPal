@@ -22,7 +22,17 @@ from farever_companion.core.player import PlayerLocator
 from farever_companion.core.scene import OFF_GAMELAYER, OFF_UNITS_ARR
 
 
-def _build_anchor(*, with_hero: bool = True, with_inst: bool = True):
+def _world_hero(hb, proc):
+    """An ent.Hero that is genuinely in-world: it owns a GameLayer at +0x58, the
+    signal the locator now requires (a menu/preview hero has none)."""
+    hero = hb.make_instance("ent.Hero")
+    gl = hb.make_instance("st.GameLayer")
+    proc.put_u64(hero + OFF_GAMELAYER, gl)
+    return hero
+
+
+def _build_anchor(*, with_hero: bool = True, with_inst: bool = True,
+                  hero_in_world: bool = True):
     """Build the full GameApp anchor chain:
 
         GameApp type_obj --super--> App hl_type --obj--> App type_obj
@@ -48,6 +58,10 @@ def _build_anchor(*, with_hero: bool = True, with_inst: bool = True):
     hero = hb.make_instance("ent.Hero")
     me = hb.make_instance("st.Player")
     layer = hb.make_instance("st.GameLayer")
+    # A located hero must be in-world (own a GameLayer); a menu/preview hero
+    # exists but has none, which the locator must reject.
+    if hero_in_world:
+        proc.put_u64(hero + OFF_GAMELAYER, hb.make_instance("st.GameLayer"))
     # singleton fields (mirror the live offsets, but resolved by class anyway).
     if with_hero:
         proc.put_u64(singleton + 0xD0, hero)
@@ -99,6 +113,24 @@ def test_anchor_type_not_found_returns_none():
     assert loc.locate() is None
 
 
+def test_anchor_reachable_at_menu_then_self_heals_in_world():
+    # Starting the companion at the main menu: GameApp.hero is null, but the
+    # chain (App static -> .inst -> GameApp) is still fully reachable. The anchor
+    # must commit its stable offsets NOW (so no heap scan / no 100s hang) and
+    # resolve the hero field lazily the moment the player loads in.
+    proc, hb, ref = _build_anchor(with_hero=False)
+    loc = GameAppLocator(proc, Hl(proc))
+    assert loc.locate() == ref["singleton"]    # singleton found with no hero
+    assert loc.reachable is True
+    assert loc.anchored is False               # hero offset not resolvable yet
+    assert loc.hero() is None                  # 'waiting for world'
+
+    world_hero = _world_hero(hb, proc)
+    proc.put_u64(ref["singleton"] + 0xD0, world_hero)   # player loads in
+    assert loc.hero() == world_hero            # self-healed: hero offset resolved
+    assert loc.anchored is True
+
+
 def test_anchor_inst_not_found_returns_none():
     # Chain exists but the static object has no GameApp `inst` pointer.
     proc, hb, ref = _build_anchor(with_inst=False)
@@ -121,8 +153,8 @@ def test_live_address_follows_anchor_through_menu_and_swap():
     pl = PlayerLocator(proc, Hl(proc))
     assert pl.locate() == ref["hero"]
 
-    # character swap: GameApp.hero now points at a different ent.Hero
-    hero2 = hb.make_instance("ent.Hero")
+    # character swap: GameApp.hero now points at a different in-world ent.Hero
+    hero2 = _world_hero(hb, proc)
     proc.put_u64(ref["singleton"] + 0xD0, hero2)
     assert pl.live_address() == hero2          # re-resolved, not the cached first hero
     assert pl.address == hero2
@@ -146,7 +178,7 @@ def test_live_address_follows_recreated_singleton():
     assert pl.locate() == ref["hero"]
 
     new_singleton = hb.make_instance("GameApp")
-    new_hero = hb.make_instance("ent.Hero")
+    new_hero = _world_hero(hb, proc)
     proc.put_u64(new_singleton + 0xD0, new_hero)             # new GameApp.hero
     proc.put_u64(ref["static_obj"] + ref["off_inst"], new_singleton)  # $App.inst swap
     assert pl.live_address() == new_hero
@@ -164,6 +196,42 @@ def test_locate_does_not_heapscan_when_anchored_but_no_hero():
     pl._candidates = lambda: (_ for _ in ()).throw(
         AssertionError("heap scan must not run while anchored"))
     assert pl.locate() is None
+
+
+def test_preview_hero_without_gamelayer_is_not_located():
+    # The fake-attach bug: launching the companion at the main menu / character-
+    # select, where GameApp.hero already points at a preview Hero that has NO
+    # GameLayer. The anchor resolves, but locate() must NOT report that hero
+    # (its scene is empty), so the tools stay locked until the player loads in.
+    proc, hb, ref = _build_anchor(hero_in_world=False)
+    pl = PlayerLocator(proc, Hl(proc))
+    pl._candidates = lambda: (_ for _ in ()).throw(
+        AssertionError("must not heap-scan once the anchor is resolved"))
+    assert pl.locate() is None                 # preview hero rejected, no fake attach
+    assert pl.live_address() is None
+    assert pl.app.anchored                     # anchor (offsets) still resolved
+
+    # player loads in: the same Hero now owns a GameLayer -> located, no rescan.
+    proc.put_u64(ref["hero"] + OFF_GAMELAYER, ref["layer"])
+    assert pl.locate() == ref["hero"]
+    assert pl.live_address() == ref["hero"]
+
+
+def test_menu_start_never_heapscans_then_locates_in_world():
+    # The reported regression: launch at the menu (no hero), then load in. The
+    # locator must NEVER touch the slow heap-scan fallback (it once wedged
+    # 'located' for 100s+), and must pick up the player once in-world.
+    proc, hb, ref = _build_anchor(with_hero=False)
+    pl = PlayerLocator(proc, Hl(proc))
+    pl._candidates = lambda: (_ for _ in ()).throw(
+        AssertionError("must not heap-scan while the anchor chain is reachable"))
+    assert pl.locate() is None                 # menu: reachable, waiting, no scan
+    assert pl.live_address() is None
+
+    world_hero = _world_hero(hb, proc)
+    proc.put_u64(ref["singleton"] + 0xD0, world_hero)   # player loads in
+    assert pl.locate() == world_hero
+    assert pl.live_address() == world_hero
 
 
 # --- PlayerLocator: heap-scan fallback -------------------------------------
@@ -186,9 +254,11 @@ def _build_fallback_heap(unit_counts):
 
 
 def test_fallback_picks_most_populated_world():
-    # anchor absent -> app.hero() is None -> heap scan + heuristic.
+    # anchor absent -> app.hero() is None -> heap scan + heuristic. The scan is
+    # opt-in (it's the slow path), so the test enables it explicitly.
     proc, hb, hero_tp, heroes = _build_fallback_heap([3, 11, 5])
     pl = PlayerLocator(proc, Hl(proc))
+    pl.heapscan_fallback = True
     # sanity: the anchor really can't resolve (no GameApp type present)
     assert pl.app.locate() is None
     got = pl.locate()
@@ -199,5 +269,20 @@ def test_fallback_none_when_no_heroes():
     proc = FakeProc()
     HeapBuilder(proc)            # empty heap, no ent.Hero type
     pl = PlayerLocator(proc, Hl(proc))
+    pl.heapscan_fallback = True
     assert pl.locate() is None
     assert pl.address is None
+
+
+def test_heapscan_fallback_off_by_default_never_scans():
+    # The crux of the wedge fix: with the anchor unresolved (e.g. the game still
+    # booting) and the fallback at its default (off), locate must return None
+    # WITHOUT ever touching the heap scan, so the worker returns instantly and the
+    # 2 s watcher keeps retrying instead of hanging.
+    proc, hb, hero_tp, heroes = _build_fallback_heap([3, 11, 5])
+    pl = PlayerLocator(proc, Hl(proc))
+    assert pl.heapscan_fallback is False       # default
+    pl._candidates = lambda: (_ for _ in ()).throw(
+        AssertionError("heap scan must not run when the fallback is off"))
+    assert pl.locate() is None
+    assert pl.live_address() is None

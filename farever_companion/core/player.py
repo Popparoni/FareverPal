@@ -11,6 +11,7 @@ module keeps a heap-scan fallback for unexpected build layouts:
 """
 from __future__ import annotations
 
+import os
 import struct
 
 from .appsingleton import GameAppLocator
@@ -25,6 +26,14 @@ OFF_PLAYER_ISME: int | None = None        # st.Player.isMe (i32/bool)
 OFF_PLAYER_HERO: int | None = None        # st.Player.hero -> ent.Hero
 OFF_HERO_ISCOMBAT: int | None = None      # ent.Hero.isInCombat (bool)
 
+# The ent.Hero heap-scan fallback is OPT-IN only (FAREVER_HEAPSCAN=1). It scans
+# the multi-GB GC heap, and when fired against a half-initialized process (the
+# companion launched before the game) it ran for minutes, held the locate worker
+# busy, and wedged 'locating player' forever. The GameApp anchor is the validated
+# path on this build, so live locate is anchor-only; the scan stays available for
+# diagnosing an unexpected build layout where the anchor never resolves.
+_HEAPSCAN_FALLBACK = os.environ.get("FAREVER_HEAPSCAN", "") not in ("", "0")
+
 
 class PlayerLocator:
     def __init__(self, proc: Proc, hl: Hl | None = None):
@@ -32,9 +41,10 @@ class PlayerLocator:
         self.hl = hl or Hl(proc)
         self._type_ptr: int | None = None
         self.address: int | None = None
-        # Primary, scan-free anchor: the GameApp singleton -> GameApp.hero.
-        # The Hero heap-scan below is kept as a fallback if the anchor can't be
-        # resolved (e.g. an unexpected build layout).
+        # Primary, scan-free anchor: the GameApp singleton -> GameApp.hero. The
+        # Hero heap-scan below is an opt-in fallback only (see _HEAPSCAN_FALLBACK);
+        # tests that exercise it set this True explicitly.
+        self.heapscan_fallback = _HEAPSCAN_FALLBACK
         self.app = GameAppLocator(proc, self.hl)
 
     # --- type bootstrap --------------------------------------------------
@@ -110,16 +120,21 @@ class PlayerLocator:
             hero = self.app.hero()
         except ProcError:
             hero = None
-        if hero is not None and self.hl.class_of(hero) == "ent.Hero":
+        if (hero is not None and self.hl.class_of(hero) == "ent.Hero"
+                and self._in_world(hero)):
             self.address = hero
             return hero
-        # Anchor IS resolved but there's no hero right now (main menu / loading
-        # transition). Don't fall back to the expensive heap scan every relocate
-        # tick - the anchor produces the hero again on its own once back in-world.
-        if self.app.anchored:
-            self.address = None
+        # No in-world hero yet. Two cases, both handled by just retrying next tick
+        # (cheap): (a) anchor reachable, we're at the menu/loading and it produces
+        # the hero on its own once in-world; (b) anchor not reachable yet, the game
+        # is still booting (companion launched first) and the metadata isn't mapped.
+        # We do NOT run the heap-scan fallback here - that scan, fired against a
+        # half-initialized process, wedged 'locating player' for minutes and never
+        # recovered. It's available only when explicitly opted in.
+        self.address = None
+        if not self.heapscan_fallback or self.app.reachable:
             return None
-        # Anchor never resolved (unexpected build): heap-scan fallback (old method).
+        # Opt-in last resort for an unexpected build where the anchor never resolves.
         cands = self._candidates()
         if not cands:
             self.address = None
@@ -137,6 +152,25 @@ class PlayerLocator:
         """Re-find the instance after a zone change (type stays cached)."""
         return self.locate()
 
+    # --- in-world gate ---------------------------------------------------
+    def _in_world(self, hero: int | None) -> bool:
+        """A Hero counts as located only once it's attached to a live GameLayer.
+
+        On the main menu / character-select a Hero object can already exist (the
+        preview model) with NO GameLayer. Without this gate the anchor binds to
+        that preview hero the instant the process is up - a 'fake attach' where
+        the tools unlock but every read hits an empty scene, and it never
+        recovers. Requiring the GameLayer makes 'located' flip true exactly when
+        the player has loaded in; the per-tick re-resolve then follows them back
+        to the menu and in again. The heap-scan fallback already required this
+        (see `_candidates`); the anchor path did not."""
+        if not hero:
+            return False
+        try:
+            return self.hl.ptr(hero + OFF_GAMELAYER) is not None
+        except ProcError:
+            return False
+
     # --- reads -----------------------------------------------------------
     def live_address(self) -> int | None:
         """The current local hero, re-resolved cheaply each call so it FOLLOWS
@@ -148,16 +182,20 @@ class PlayerLocator:
         load back in). Only the heap-scan fallback build, where the anchor never
         resolves, uses the last located address, re-validated so a stale pointer
         after a zone change still degrades to None instead of reading garbage."""
-        if self.app.anchored:
+        if self.app.reachable:
             hero = self.app.live_hero()
-            if hero is not None and self.hl.class_of(hero) == "ent.Hero":
+            if (hero is not None and self.hl.class_of(hero) == "ent.Hero"
+                    and self._in_world(hero)):
                 self.address = hero
                 return hero
-            self.address = None       # menu / transition: no live hero right now
+            self.address = None       # menu / transition: no in-world hero now
             return None
         # heap-scan fallback build: keep the last address but drop it if it's no
-        # longer a live Hero (zone change freed/reused it).
-        if self.address is not None and self.hl.class_of(self.address) != "ent.Hero":
+        # longer a live, in-world Hero (zone change freed/reused it, or back to
+        # the menu where the hero has no GameLayer).
+        if self.address is not None and (
+                self.hl.class_of(self.address) != "ent.Hero"
+                or not self._in_world(self.address)):
             self.address = None
         return self.address
 
