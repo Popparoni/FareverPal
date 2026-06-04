@@ -67,17 +67,23 @@ class FareverAPI:
     def categories(self) -> dict:
         return self._request("GET", "/api/categories.php")
 
-    def submit_run(self, category: str, time_ms: int, mode: str = "normal",
-                   video_url: str = "", title: str = "", notes: str = "", server: str = "",
-                   co_runners: list | None = None, build_code: str = "") -> dict:
-        """-> {ok, id, status, flagged, flag_reason}. `co_runners` = friend codes
-        (FRVR-XXXX-XXXX); the server links each co-runner's featured build.
-        `build_code` overrides the build linked to *your* run; empty = the server
-        falls back to your profile's featured build."""
+    def submit_run(self, category: str, time_ms: int, mode: str = "hard",
+                   run_type: str = "full", video_url: str = "", title: str = "",
+                   notes: str = "", server: str = "", co_runners: list | None = None,
+                   build_code: str = "", companion_version: str = "",
+                   client_run_id: str = "") -> dict:
+        """-> {ok, id, status, flagged, flag_reason, on_board, board_reason}.
+        `run_type` is the board ('full' dungeon | 'boss' only). `client_run_id` ties
+        the two splits the timer emits from one run. `companion_version` lets the
+        season gate stale builds (board_reason 'companion_outdated' => profile-only).
+        `co_runners` = friend codes (FRVR-XXXX-XXXX); the server links each
+        co-runner's featured build. `build_code` overrides the build linked to *your*
+        run; empty = the server falls back to your profile's featured build."""
         body = {
             "category": category,
             "time_ms": int(time_ms),
             "mode": mode,
+            "run_type": run_type,
             "video_url": video_url,
             "title": title,
             "notes": notes,
@@ -86,6 +92,10 @@ class FareverAPI:
         }
         if build_code:
             body["build_code"] = build_code
+        if companion_version:
+            body["companion_version"] = companion_version
+        if client_run_id:
+            body["client_run_id"] = client_run_id
         return self._request("POST", "/api/speedrun/submit.php", body, auth=True)
 
     def lookup_build(self, code: str) -> dict:

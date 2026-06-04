@@ -25,7 +25,8 @@ import struct
 from .proc import Proc, ProcError
 from .constants import (
     HOBJ as _HOBJ, HSTRUCT as _HSTRUCT, USER_MIN as _USER_MIN,
-    USER_MAX as _USER_MAX, TO_NAME, TO_SUPER, TO_FIELDS, FIELD_STRIDE,
+    USER_MAX as _USER_MAX, TO_NAME, TO_SUPER, TO_FIELDS, TO_RUNTIME,
+    FIELD_STRIDE, RT_NFIELDS, RT_SIZE, RT_FI_CANDIDATES, HL_WSIZE,
     NA_SIZE_OFF, NA_DATA_OFF,
 )
 
@@ -46,6 +47,7 @@ class Hl:
         self._name_cache: dict[int, str | None] = {}
         self._str_cache: dict[int, str | None] = {}
         self._anc_cache: dict[int, frozenset[str]] = {}
+        self._field_off_cache: dict[tuple[int, str], int | None] = {}
 
     # --- primitives ------------------------------------------------------
     def ptr(self, addr: int) -> int | None:
@@ -182,6 +184,90 @@ class Hl:
             except ProcError:
                 break
         return out
+
+    def field_offset(self, type_ptr: int, name: str) -> int | None:
+        """Byte offset of field `name` within an instance of `type_ptr`, found by
+        name across the whole super-chain (so inherited fields resolve too). None
+        if it can't be resolved. Reflection-only - no hardcoded layout - so it
+        survives patches; self-validating, so a wrong assumption degrades to None
+        rather than a bad read. Cached by (type_ptr, name)."""
+        key = (type_ptr, name)
+        if key in self._field_off_cache:
+            return self._field_off_cache[key]
+        off = self._resolve_field_offset(type_ptr, name)
+        self._field_off_cache[key] = off
+        return off
+
+    def _resolve_field_offset(self, type_ptr: int, name: str) -> int | None:
+        if not is_ptr(type_ptr):
+            return None
+        # Build the global field order (super-first): collect each level's own
+        # fields up the chain, then reverse. The HL runtime numbers fields the
+        # same way, so a name's position here is its global field index.
+        levels: list[list[str]] = []
+        tp = type_ptr
+        seen: set[int] = set()
+        try:
+            while is_ptr(tp) and tp not in seen and len(levels) < 32:
+                seen.add(tp)
+                if self.i32(tp) not in (_HOBJ, _HSTRUCT):
+                    break
+                obj_ptr = self.u64(tp + 8)
+                levels.append(self.field_names(tp))
+                tp = self.u64(obj_ptr + TO_SUPER)
+        except ProcError:
+            return None
+        global_names = [n for lvl in reversed(levels) for n in lvl]
+        try:
+            gidx = global_names.index(name)
+        except ValueError:
+            return None
+        # Read the byte offset from the concrete type's runtime layout table.
+        try:
+            obj_ptr = self.u64(type_ptr + 8)
+            rt = self.u64(obj_ptr + TO_RUNTIME)
+            if not is_ptr(rt):
+                return None
+            nfields = self.i32(rt + RT_NFIELDS)
+            size = self.i32(rt + RT_SIZE)
+        except ProcError:
+            return None
+        # Consistency gate: our name-derived field count must match the runtime's.
+        if len(global_names) != nfields or not (0 <= gidx < nfields):
+            return None
+        offsets = self._fields_indexes(rt, nfields)
+        if offsets is None or gidx >= len(offsets):
+            return None
+        off = offsets[gidx]
+        # The offset must be a real field slot (>0; slot 0 is the hl_type*) and,
+        # when the instance size is sane, lie inside the instance.
+        if off <= 0 or (0 < size < (1 << 20) and off + HL_WSIZE > size):
+            return None
+        return off
+
+    def _fields_indexes(self, rt: int, nfields: int) -> list[int] | None:
+        """The hl_runtime_obj field-offset array (int[nfields]). Its slot moved
+        between builds, so probe the candidates and accept the one that reads as a
+        plausible offset table: nfields entries, the first at HL_WSIZE, strictly
+        ascending, all in object range. None if none qualify (-> caller bails)."""
+        if not (0 < nfields < 4096):
+            return None
+        for slot in RT_FI_CANDIDATES:
+            try:
+                arr = self.u64(rt + slot)
+            except ProcError:
+                continue
+            if not is_ptr(arr):
+                continue
+            raw = self.proc.try_read(arr, nfields * 4)
+            if raw is None:
+                continue
+            vals = list(struct.unpack_from("<%di" % nfields, raw, 0))
+            if (vals[0] == HL_WSIZE
+                    and all(0 < vals[i] < (1 << 16) for i in range(nfields))
+                    and all(vals[i] < vals[i + 1] for i in range(nfields - 1))):
+                return vals
+        return None
 
     # --- strings ---------------------------------------------------------
     def hl_string(self, strobj: int | None) -> str | None:

@@ -3,8 +3,10 @@
 Top-down radar centred on the player: chests, gatherables, enemies and obelisks
 plotted from the shared LiveModel + the static chest index. Zoomable; POIs
 beyond the view clamp to the edge ring as direction markers. Right-click a POI
-to mark it done (persists). The heading arrow rotates by the player heading read
-in `core/player.py` (camera yaw isn't available in the pure-read build)."""
+to mark it done (persists). The view rotates by the camera orbit yaw (mouse
+look, via `model.camera_yaw()`) so it tracks where you're looking even when
+standing still; it falls back to the movement heading when the camera yaw can't
+be read. The player arrow shows the body heading within that frame."""
 from __future__ import annotations
 
 import math
@@ -117,19 +119,24 @@ class _Canvas(QtWidgets.QWidget):
 
     def _phi(self):
         """Rotation applied so the view direction points up. Prefer the free-look
-        CAMERA yaw (mouse orbit); fall back to movement heading; 0 = north-up."""
+        CAMERA yaw (mouse orbit); fall back to movement heading; 0 = north-up.
+        Heading is a world atan2 (0=+x, CCW) and north is -y, so facing-up is
+        phi = pi/2 + heading (the north-up Y flip in _rel carries the sign)."""
         if not self.s.minimap_rotate:
             return 0.0
         if self._cam_yaw is not None:
             return math.pi / 2 - (CAM_YAW_SIGN * self._cam_yaw + CAM_YAW_OFFSET)
         if self._heading is not None:
-            return math.pi / 2 - self._heading
+            return math.pi / 2 + self._heading
         return 0.0
 
     def _rel(self, wx, wy, scale, phi):
-        """World point -> rotated screen-space delta (dx right, dy up)."""
+        """World point -> rotated screen-space delta (dx right, dy up).
+        North is low world-Y (matches the web map projection: low Y = image
+        top = north), so the up component is (py - wy) - a POI north of the
+        player has wy < py and lands above centre."""
         dx = (wx - self._px) * scale
-        dy = (wy - self._py) * scale
+        dy = (self._py - wy) * scale
         if phi:
             c, s = math.cos(phi), math.sin(phi)
             dx, dy = dx * c - dy * s, dx * s + dy * c
@@ -212,7 +219,8 @@ class _Canvas(QtWidgets.QWidget):
         self._draw_compass(p, cx, cy, rad, phi)
         # player marker + facing arrow (uses the live Highlight color)
         accent = QtGui.QColor(self.s.hud_accent)
-        fwd = (self._heading + phi) if self._heading is not None else (math.pi / 2)
+        # north-up frame: world heading's y-component inverts, so -heading
+        fwd = (phi - self._heading) if self._heading is not None else (math.pi / 2)
         p.setBrush(accent)
         p.setPen(QtCore.Qt.NoPen)
         p.drawEllipse(QtCore.QPointF(cx, cy), 4, 4)
@@ -231,12 +239,12 @@ class _Canvas(QtWidgets.QWidget):
         s, A = scale, MAP_SCALE
         cosf, sinf = math.cos(phi), math.sin(phi)
         u0 = -MAP_OFF_X / A - self._px      # world x at image px 0
-        v0 = -MAP_OFF_Y / A - self._py
+        w0 = MAP_OFF_Y / A + self._py       # paired with the north-up Y row below
         t = QtGui.QTransform(
             s * cosf / A, -s * sinf / A,    # m11, m12  (coeffs of image x)
-            -s * sinf / A, -s * cosf / A,   # m21, m22  (coeffs of image y)
-            cx + s * cosf * u0 - s * sinf * v0,
-            cy - s * sinf * u0 - s * cosf * v0)
+            s * sinf / A, s * cosf / A,     # m21, m22  (coeffs of image y; Y unflipped)
+            cx + s * cosf * u0 - s * sinf * w0,
+            cy - s * sinf * u0 - s * cosf * w0)
         p.save()
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         p.setTransform(t, True)

@@ -24,7 +24,20 @@ TO_NAME = 0x10       # -> name (uchar*, UTF-16LE, null-terminated)
 TO_SUPER = 0x18      # -> super (hl_type*)
 TO_FIELDS = 0x20     # -> fields (hl_obj_field[])
 TO_GLOBALVAL = 0x38  # -> &globals_data slot (the type's static $Class object)
+TO_RUNTIME = 0x48    # -> hl_runtime_obj* (rt; computed lazily by the HL runtime)
 FIELD_STRIDE = 0x18  # sizeof(hl_obj_field) on 64-bit
+
+# hl_runtime_obj (the type's resolved layout): used to look up a field's byte
+# offset by name. fields_indexes[i] is the offset of the i-th field in global
+# (super-first) order, so own fields are the last `hl_type_obj.nfields` entries.
+# nfields(@0x08) and size(@0x10) are stable, but the fields_indexes pointer slot
+# moved between builds (seen at 0x28, not the upstream 0x20), so it's auto-detected
+# from these candidates: the right slot points at an int[nfields] array that starts
+# at HL_WSIZE (8) and strictly ascends. Confirmed live 2026-06-04 (slot 0x28).
+RT_NFIELDS = 0x08        # total field count incl. inherited (i32)
+RT_SIZE = 0x10           # instance size in bytes (i32; sanity-bounds an offset)
+RT_FI_CANDIDATES = (0x28, 0x20, 0x30, 0x18, 0x38)  # fields_indexes slot, tried in order
+HL_WSIZE = 8             # word size; first field sits right after the hl_type* at 0
 
 # ArrayObj[+8]=length(i32); ArrayObj[+0x10] -> NativeArray
 NA_SIZE_OFF = 0x10   # NativeArray size (i32)

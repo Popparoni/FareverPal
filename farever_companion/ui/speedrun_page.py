@@ -44,14 +44,16 @@ class SpeedrunPageMixin:
         v.addWidget(self._auto_upload_hint)
         self._refresh_speedrun_gating()
 
-        mode_seg = C.SegmentedControl(
-            ["Normal", "Hard"],
-            "Hard" if self.s.speedrun_mode == "hard" else "Normal")
-        mode_seg.currentChanged.connect(
-            lambda t: self._set("speedrun_mode", "hard" if t == "Hard" else "normal"))
-        f = C.Field("Difficulty fallback", mode_seg)
-        f.setToolTip("Used when auto-detect is off or the boss level can't be read.")
-        v.addWidget(f)
+        # Boards are Hard-only, so the fallback difficulty is fixed to Hard (used
+        # only when auto-detect is off or the live boss level can't be read). A
+        # detected Normal run still uploads as Normal - it just lands on the
+        # player's profile, never on a leaderboard.
+        fb = QtWidgets.QLabel(
+            "Fallback difficulty: Hard. Detected Normal runs are saved to your "
+            "profile only — they don't appear on any leaderboard.")
+        fb.setObjectName("Muted")
+        fb.setWordWrap(True)
+        v.addWidget(fb)
 
         v.addWidget(C.SectionHeader("Build"))
         self._build_profile_lbl = QtWidgets.QLabel("")

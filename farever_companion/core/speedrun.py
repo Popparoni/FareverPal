@@ -44,9 +44,12 @@ class SpeedrunTimer:
         self.last: float | None = None       # last finished time (s)
         self.is_new_best = False             # set True on a finish that beat PB
         self.is_kill = False                 # True iff this finish was a real boss kill
+        self.source: str | None = None      # "auto" (detected) | "manual" (hotkey/button)
 
     # --- control (hotkeys / buttons) ------------------------------------
-    def start(self) -> None:
+    def start(self, source: str = "manual") -> None:
+        # `source` records how the run began: "auto" (the AutoStarter fired on real
+        # movement) vs "manual" (a hotkey/button). Manual runs can't be auto-uploaded.
         self.state = self.RUNNING
         self._t0 = time.monotonic()
         self._frozen = 0.0
@@ -55,6 +58,7 @@ class SpeedrunTimer:
         self._max_hp = 0.0
         self.is_new_best = False
         self.is_kill = False
+        self.source = source
 
     def stop(self, kill: bool = False) -> None:
         if self.state == self.RUNNING:
@@ -72,6 +76,7 @@ class SpeedrunTimer:
         self.boss_id = None
         self.is_new_best = False
         self.is_kill = False
+        self.source = None
 
     def toggle(self) -> None:
         """One-key: start when idle/finished, stop while running."""
@@ -244,3 +249,79 @@ class ModeLatch:
         if self.src == "auto":
             return self.mode, "auto"
         return fresh_mode, fresh_src
+
+
+class BossTimer:
+    """The boss-only split: a second stopwatch that ARMS on the first hit landed on
+    the boss fight and FREEZES when the boss dies. Runs alongside the full-run timer
+    (both stop at the same kill); the HUD shows them together. Pure + headless.
+    """
+    READY, RUNNING, DONE = "ready", "running", "done"
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.state = self.READY
+        self._t0 = 0.0
+        self._frozen = 0.0
+        self.last: float | None = None      # last finished boss-split time (s)
+
+    def arm(self) -> None:
+        """Start the split on the first hit (no-op once armed/finished)."""
+        if self.state == self.READY:
+            self.state = self.RUNNING
+            self._t0 = time.monotonic()
+
+    def stop(self) -> None:
+        if self.state == self.RUNNING:
+            self._frozen = time.monotonic() - self._t0
+            self.state = self.DONE
+            self.last = self._frozen
+
+    def elapsed(self) -> float:
+        if self.state == self.RUNNING:
+            return time.monotonic() - self._t0
+        return self._frozen
+
+
+class Encounter:
+    """The boss-only split's view of a (possibly multi-unit) boss fight.
+
+    `members` are the unit_ids that count as the fight; `kill_id` is the unit whose
+    death ends the run. With `engage_any` (a trashless room - only the boss + adds)
+    any enemy counts, so the split arms on the first hit to anything. Fed each tick
+    with every member's live `(unit_id, present, hp)`, it latches ENGAGED on the
+    first damage to a counted unit - hp dropping below the peak HP seen for that unit
+    (MaxHealth has no offset, so we track the peak) - and returns the kill boss's
+    tuple for the existing SpeedrunTimer.feed_boss kill detection. Pure/headless so
+    the dual-timer logic is testable without the game.
+    """
+
+    def __init__(self, members, kill_id: str | None, engage_any: bool = False):
+        self.members = set(members)
+        self.kill_id = kill_id
+        self.engage_any = engage_any
+        self._peak: dict[str, float] = {}
+        self.engaged = False
+
+    def reset(self) -> None:
+        self._peak.clear()
+        self.engaged = False
+
+    def feed(self, states) -> tuple[str | None, bool, float | None]:
+        """states: iterable of (unit_id, present, hp) for the encounter units in
+        scene. Latches self.engaged on the first HP drop; returns the kill boss's
+        (id, present, hp) tuple (defaults to not-present when it isn't in scene)."""
+        kill = (self.kill_id, False, None)
+        for uid, present, hp in states:
+            if uid == self.kill_id:
+                kill = (uid, present, hp)
+            counts = self.engage_any or uid in self.members
+            if counts and present and hp is not None and hp > 0:
+                peak = self._peak.get(uid, 0.0)
+                if hp > peak:
+                    self._peak[uid] = hp
+                elif peak > 0.0 and hp < peak:
+                    self.engaged = True
+        return kill

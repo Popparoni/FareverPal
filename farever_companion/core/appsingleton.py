@@ -32,6 +32,7 @@ CLS_APP = "App"
 CLS_HERO = "ent.Hero"
 CLS_PLAYER = "st.Player"
 CLS_LAYER = "st.GameLayer"
+CLS_CAMERA = "client.GameCamera"   # GameApp.camera/gameCamera; orbit yaw follows the mouse
 
 # How far into an object to look for the pointer fields we resolve by class.
 _FIELD_SCAN_BYTES = 0x400
@@ -48,6 +49,7 @@ class GameAppLocator:
         self.off_hero: int | None = None
         self.off_me: int | None = None
         self.off_layer: int | None = None
+        self.off_camera: int | None = None     # GameApp.camera (client.BaseCamera)
 
     # --- low-level safe reads --------------------------------------------
     def _u64(self, addr: int) -> int | None:
@@ -156,12 +158,17 @@ class GameAppLocator:
             wanted[CLS_PLAYER] = "me"
         if self.off_layer is None:
             wanted[CLS_LAYER] = "layer"
+        if self.off_camera is None:
+            # GameApp holds both `camera` (active) and `gameCamera`; in normal play
+            # both point at the GameCamera, so the first (lower-offset) match wins.
+            wanted[CLS_CAMERA] = "camera"
         if not wanted:
             return
         found = self._scan_for_class(singleton, wanted)
         self.off_hero = found.get("hero", self.off_hero)
         self.off_me = found.get("me", self.off_me)
         self.off_layer = found.get("layer", self.off_layer)
+        self.off_camera = found.get("camera", self.off_camera)
 
     def _try_chain(self, gameapp_obj: int) -> int | None:
         """Full chain for one candidate type_obj -> validated GameApp singleton,
@@ -248,10 +255,13 @@ class GameAppLocator:
             self._addr = None
             return None
         self._addr = singleton                      # refresh cache for me()/layer()
+        # self-heal field offsets once in-world; keep retrying while ANY is still
+        # unknown (the camera can be null the instant the hero first resolves, so
+        # gating only on off_hero could leave off_camera permanently unset).
+        if self.off_hero is None or self.off_camera is None:
+            self._resolve_fields(singleton)
         if self.off_hero is None:
-            self._resolve_fields(singleton)         # self-heal once in-world
-            if self.off_hero is None:
-                return None
+            return None
         hero = self._u64(singleton + self.off_hero)
         return hero if is_ptr(hero) else None
 
@@ -264,3 +274,11 @@ class GameAppLocator:
         if self._addr is None or self.off_layer is None:
             return None
         return self.hl.ptr(self._addr + self.off_layer)
+
+    def camera(self) -> int | None:
+        """The active gameplay camera (client.BaseCamera). Relies on `_addr` being
+        the current singleton - live_hero() refreshes it each tick before the
+        minimap reads the yaw."""
+        if self._addr is None or self.off_camera is None:
+            return None
+        return self.hl.ptr(self._addr + self.off_camera)

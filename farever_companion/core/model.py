@@ -16,7 +16,7 @@ from .chest_resolver import ChestResolver, ChestRow
 from .damage_source import DamageSourceManager
 from . import attributes
 from ..combat.dps import DpsMeter
-from ..data import loot, units as udata, rarity as rarity_mod
+from ..data import loot, units as udata, rarity as rarity_mod, encounters as encdata
 
 XYZ = tuple[float, float, float]
 
@@ -77,7 +77,30 @@ class LiveModel:
         self.damage.recalibrate()
 
     def camera_yaw(self) -> float | None:
-        return None
+        """The gameplay camera's orbit yaw (radians). Unlike the body heading
+        (ent.Entity.rotationZ at OFF_HEADING, which only turns while moving), the
+        camera follows the mouse even while the player stands still - so the
+        minimap rotates with where you're looking, not just where you last moved.
+
+        Read from GameApp.camera (client.BaseCamera).curDirection, the smoothed
+        current orbit angle, with the field offset resolved by name via HL
+        reflection (no hardcoded layout). None until the camera + field resolve,
+        in which case the minimap falls back to the body heading. The angle's
+        zero/sign convention differs from the world heading, so the minimap aligns
+        it with CAM_YAW_SIGN / CAM_YAW_OFFSET (tune live)."""
+        cam = self.locator.app.camera()
+        if cam is None:
+            return None
+        tp = self.hl.ptr(cam)
+        if tp is None:
+            return None
+        off = self.hl.field_offset(tp, "curDirection")
+        if off is None:
+            return None
+        try:
+            return self.hl.f64(cam + off)
+        except ProcError:
+            return None
 
     def shutdown(self) -> None:
         self.damage.shutdown()
@@ -164,6 +187,40 @@ class LiveModel:
                 except ProcError:
                     return (bid, True, None)
         return (bid, False, None)
+
+    def encounter_state(self):
+        """The boss-only split's per-tick view: `(members, kill_id, states, engage_any)`
+        where states = `[(unit_id, present, hp)]` for each encounter unit in scene.
+        Single-boss dungeons (the default) collapse to just the dungeon boss, so this
+        is a superset of boss_state(); a trashless `engage_any` room feeds every enemy
+        so the split can arm on the first hit to anything. `([], None, [], False)`
+        outside an instance.
+        """
+        scene = self.units()        # populates dungeon_boss; must run first
+        bid = self.dungeon_boss
+        if not bid:
+            return ([], None, [], False)
+        members, kill_id, engage_any = encdata.resolve(bid)
+        states: list[tuple[str, bool, float | None]] = []
+        seen: set[str] = set()
+        for e in scene:
+            if engage_any:
+                if not e.is_enemy:
+                    continue
+            elif e.unit_id not in members:
+                continue
+            try:
+                hp = attributes.health(self.hl, e.addr)
+            except ProcError:
+                hp = None
+            states.append((e.unit_id, True, hp))
+            seen.add(e.unit_id)
+        # Listed members not in scene -> reported absent so a kill-boss despawn still
+        # registers (the existing kill/left detection needs the boss's liveness).
+        for uid in members:
+            if uid not in seen:
+                states.append((uid, False, None))
+        return (members, kill_id, states, engage_any)
 
     HARD_LEVEL = 20     # Hard mode scales every dungeon to this level
 

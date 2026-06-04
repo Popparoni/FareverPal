@@ -3,8 +3,9 @@
 Guards the leaderboard-integrity bug: leaving the dungeon (boss despawns at full
 HP, e.g. going to the main menu) must CANCEL the run, never auto-finish + upload.
 """
-from farever_companion.core.speedrun import AutoStarter, ModeLatch
+from farever_companion.core.speedrun import AutoStarter, BossTimer, Encounter, ModeLatch
 from farever_companion.core.speedrun import SpeedrunTimer as T
+from farever_companion.data import encounters
 
 
 def _running():
@@ -164,3 +165,110 @@ def test_modelatch_reset_clears_previous_run():
     m.observe("hard", "auto")
     m.reset()                          # new run
     assert m.resolve("normal", "manual") == ("normal", "manual")
+
+
+# --- run source: manual (hotkey) runs can't be auto-uploaded ------------------
+
+def test_timer_source_auto_start():
+    t = T()
+    t.start("auto")
+    assert t.source == "auto"
+
+
+def test_timer_source_hotkey_is_manual():
+    t = T()
+    t.toggle()                         # hotkey/button start
+    assert t.source == "manual"
+    t.reset()
+    assert t.source is None
+
+
+# --- BossTimer: the boss-only split ------------------------------------------
+
+def test_bosstimer_arm_then_stop_freezes():
+    b = BossTimer()
+    assert b.state == b.READY and b.elapsed() == 0.0
+    b.arm()
+    assert b.state == b.RUNNING
+    b.arm()                            # idempotent: already running
+    assert b.state == b.RUNNING
+    b.stop()
+    assert b.state == b.DONE and b.last is not None and b.last >= 0.0
+    assert b.elapsed() == b.last       # frozen after stop
+
+
+def test_bosstimer_reset_clears():
+    b = BossTimer()
+    b.arm()
+    b.stop()
+    b.reset()
+    assert b.state == b.READY and b.last is None and b.elapsed() == 0.0
+
+
+# --- Encounter: first-hit engagement + kill-boss proxy -----------------------
+
+def test_encounter_engages_on_first_hit():
+    e = Encounter({"MunsterChuck"}, "MunsterChuck")
+    assert e.feed([("MunsterChuck", True, 21000.0)]) == ("MunsterChuck", True, 21000.0)
+    assert e.engaged is False                      # at full HP, no hit yet
+    e.feed([("MunsterChuck", True, 20000.0)])      # took damage
+    assert e.engaged is True
+
+
+def test_encounter_absent_boss_reports_not_present():
+    e = Encounter({"MunsterChuck"}, "MunsterChuck")
+    assert e.feed([]) == ("MunsterChuck", False, None)
+    assert e.engaged is False
+
+
+def test_encounter_any_member_hit_engages():
+    e = Encounter({"Add", "Cleodora"}, "Cleodora")
+    e.feed([("Add", True, 500.0), ("Cleodora", True, 9000.0)])
+    assert e.engaged is False
+    e.feed([("Add", True, 450.0), ("Cleodora", True, 9000.0)])   # an add took damage
+    assert e.engaged is True
+
+
+def test_encounter_engage_any_arms_on_any_enemy():
+    # Trashless room: members lists only the kill boss, but engage_any means a hit
+    # to ANY fed enemy (a worker bee) starts the split.
+    e = Encounter({"Cleodora"}, "Cleodora", engage_any=True)
+    assert e.feed([("Worker", True, 100.0), ("Cleodora", True, 9000.0)]) == ("Cleodora", True, 9000.0)
+    assert e.engaged is False
+    e.feed([("Worker", True, 80.0), ("Cleodora", True, 9000.0)])   # hit a worker, not the boss
+    assert e.engaged is True
+
+
+def test_encounter_no_engage_any_ignores_nonmembers():
+    # Default (boss + trash): hitting a trash mob must NOT start the boss split.
+    e = Encounter({"Boss"}, "Boss")
+    e.feed([("Trash", True, 100.0), ("Boss", True, 9000.0)])
+    e.feed([("Trash", True, 10.0), ("Boss", True, 9000.0)])        # trash took damage
+    assert e.engaged is False
+
+
+def test_encounter_reset_clears_engagement():
+    e = Encounter({"MunsterChuck"}, "MunsterChuck")
+    e.feed([("MunsterChuck", True, 100.0)])
+    e.feed([("MunsterChuck", True, 10.0)])
+    assert e.engaged is True
+    e.reset()
+    assert e.engaged is False
+
+
+# --- encounter definitions: default single-boss, multi-boss stubbed ----------
+
+def test_resolve_single_boss_default():
+    assert encounters.resolve("MunsterChuck") == ({"MunsterChuck"}, "MunsterChuck", False)
+
+
+def test_resolve_none_is_empty():
+    assert encounters.resolve(None) == (set(), None, False)
+
+
+def test_resolve_cleodora_is_engage_any():
+    # The trashless Honeyzabeth room: kill on Cleodora, fight arms on any first hit.
+    members, kill_id, engage_any = encounters.resolve("Cleodora")
+    assert kill_id == "Cleodora"
+    assert members == {"Cleodora"}
+    assert engage_any is True

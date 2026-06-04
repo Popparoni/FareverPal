@@ -63,7 +63,10 @@ pointer, resolves the class name, walks the super-chain (`is_a`, `ancestors`),
 reads HashLink strings, and reads HashLink arrays. Type pointers are stable for
 the process lifetime, so class-name lookups are cached. This is what lets
 `scene.py` say "this object is an `ent.Foe` subclass" without hardcoding anything
-per enemy.
+per enemy. `field_offset(type, name)` resolves a field's byte offset by name (via
+the HL runtime layout table, searching the super-chain), so reads like the camera
+yaw don't hardcode a struct offset; it self-validates and returns `None` if the
+layout doesn't match, so a wrong assumption degrades instead of misreading.
 
 ### `core/player.py` + `core/appsingleton.py` — locating the player
 Fully read-only, no writes, no hooks. The primary path (`appsingleton.py`)
@@ -72,9 +75,13 @@ then follows runtime pointers to the local player object. The singleton is stabl
 for the session, so the player is then re-read each frame with no further
 scanning. `PlayerLocator` wraps this and falls back to a pure-read heap scan for
 the player type if the anchor can't be resolved. The locator exposes `locate`,
-`address`, `read_xyz`, and `read_heading` (the minimap rotates by player heading;
-free-look camera yaw isn't in the player struct, so it stays unavailable in the
-pure-read build).
+`address`, `read_xyz`, and `read_heading`. The app singleton also exposes the
+active gameplay camera (`GameApp.camera`, a `client.BaseCamera`); `LiveModel.
+camera_yaw()` reads its `curDirection` (offset resolved by name via
+`hl.field_offset`). That orbit yaw follows the mouse even while the player stands
+still, so the minimap rotates by where you're looking rather than only the body
+heading (`ent.Entity.rotationZ`, which turns only while moving); it falls back to
+the heading if the camera yaw can't be read.
 
 ### `core/scene.py` — the scene snapshot
 From the player pointer, walks to the `GameLayer`, then the unit and element
