@@ -19,6 +19,44 @@ def fmt_time(secs: float) -> str:
     return f"{m:02d}:{s:05.2f}"
 
 
+def record_lines(done: bool, boss_armed: bool, boss_last: float | None,
+                 full_last: float | None, boss_best: float | None,
+                 full_best: float | None, boss_is_new_best: bool,
+                 full_is_new_best: bool) -> tuple[str, str | None]:
+    """The HUD record lines as (primary, secondary) strings (secondary is None when
+    there's nothing to add). The BOSS split is the headline metric - boss time is
+    what speedrunners care about - so its PB/LAST is the primary line, with the
+    full-run PB on a smaller secondary line. When this dungeon has no boss split at
+    all (the boss timer never armed and there's no stored boss PB), fall back to the
+    full run as the primary line. Pure/headless so the overlay's display is testable
+    without Qt or the game."""
+    have_boss_last = boss_armed and boss_last is not None
+    if boss_best is not None or have_boss_last:
+        parts = []
+        if done and boss_is_new_best:
+            parts.append("★ NEW BEST")
+        if boss_best is not None:
+            parts.append(f"PB {fmt_time(boss_best)}")
+        if have_boss_last:
+            parts.append(f"LAST {fmt_time(boss_last)}")
+        primary = "   ·   ".join(parts) or "no record yet"
+        full_parts = []
+        if full_best is not None:
+            full_parts.append(f"full PB {fmt_time(full_best)}")
+        if done and full_last is not None:
+            full_parts.append(f"full {fmt_time(full_last)}")
+        return primary, ("   ·   ".join(full_parts) if full_parts else None)
+
+    parts = []
+    if done and full_is_new_best:
+        parts.append("★ NEW BEST")
+    if full_best is not None:
+        parts.append(f"PB {fmt_time(full_best)}")
+    if full_last is not None:
+        parts.append(f"LAST {fmt_time(full_last)}")
+    return ("   ·   ".join(parts) or "no record yet"), None
+
+
 class SpeedrunTimer:
     READY, RUNNING, DONE = "ready", "running", "done"
 

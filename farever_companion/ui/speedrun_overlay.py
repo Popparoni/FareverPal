@@ -18,7 +18,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import theme
 from .overlay_base import OverlayWindow
 from .. import __version__
-from ..core.speedrun import SpeedrunTimer, BossTimer, Encounter, AutoStarter, ModeLatch, fmt_time
+from ..core.speedrun import (
+    SpeedrunTimer, BossTimer, Encounter, AutoStarter, ModeLatch, fmt_time, record_lines)
 from ..data import names, icons
 from ..api import FareverAPI
 
@@ -45,6 +46,9 @@ class SpeedrunOverlay(OverlayWindow):
         self._latch = ModeLatch()               # last good auto-detected difficulty this run
         self._done_ctr = 0                      # ticks since a finish (for back-to-back re-arm)
         self._uploaded = False                  # guard: one upload per finished run
+        self._completion_sent = False           # guard: one per-dungeon completion ping per run
+        self._client_run_id = ""                # shared id tying the upload + completion ping
+        self.boss_is_new_best = False           # set True when a finish beats the BOSS-split PB
         self._run_mode: str | None = None       # difficulty captured at finish
         self._run_mode_src: str | None = None    # "auto" (read from boss level) | "manual"
         self._live_mode: str | None = None       # difficulty resolved live (for the HUD readout)
@@ -103,10 +107,18 @@ class SpeedrunOverlay(OverlayWindow):
         self.warn_lbl.hide()
         self.content.addWidget(self.warn_lbl)
 
+        # Record line: the BOSS-split PB/LAST is the headline metric (boss time is
+        # what matters), with the full-run PB on a smaller secondary line below.
         self.pb_lbl = QtWidgets.QLabel("no record yet")
         self.pb_lbl.setObjectName("Mono")
         self.pb_lbl.setAlignment(QtCore.Qt.AlignCenter)
         self.content.addWidget(self.pb_lbl)
+
+        self.full_pb_lbl = QtWidgets.QLabel("")
+        self.full_pb_lbl.setObjectName("Mono")
+        self.full_pb_lbl.setAlignment(QtCore.Qt.AlignCenter)
+        self.full_pb_lbl.hide()
+        self.content.addWidget(self.full_pb_lbl)
 
         self.upload_lbl = QtWidgets.QLabel("")
         self.upload_lbl.setObjectName("Mono")
@@ -148,11 +160,14 @@ class SpeedrunOverlay(OverlayWindow):
         self._latch.reset()
         self._done_ctr = 0
         self._uploaded = False
+        self._completion_sent = False
+        self.boss_is_new_best = False
         self._run_mode = None
         self._run_mode_src = None
         self.upload_lbl.hide()
         self.warn_lbl.hide()
         self.sub_lbl.hide()
+        self.full_pb_lbl.hide()
         self._upload_btn.hide()
         self._render()
 
@@ -229,6 +244,8 @@ class SpeedrunOverlay(OverlayWindow):
         # fresh boss split.
         if t.state == t.RUNNING and self._prev_state != t.RUNNING:
             self._uploaded = False
+            self._completion_sent = False
+            self.boss_is_new_best = False
             self._latch.reset()
             self.boss_timer.reset()
             if self.encounter is not None:
@@ -236,6 +253,7 @@ class SpeedrunOverlay(OverlayWindow):
             self.upload_lbl.hide()
             self.warn_lbl.hide()
             self.sub_lbl.hide()
+            self.full_pb_lbl.hide()
             self._upload_btn.hide()
 
         # Run just finished -> capture difficulty, PB, upload. Prefer the value
@@ -244,6 +262,7 @@ class SpeedrunOverlay(OverlayWindow):
         # CONFIRMED kill (a manual stop must never set a bogus PB or auto-submit).
         if t.state == t.DONE and self._prev_state != t.DONE:
             self._done_ctr = 0
+            self._client_run_id = secrets.token_hex(8)   # ties the upload + completion ping
             # Freeze the boss split too (a manual stop won't have hit the kill path).
             if self.boss_timer.state == BossTimer.RUNNING:
                 self.boss_timer.stop()
@@ -251,6 +270,7 @@ class SpeedrunOverlay(OverlayWindow):
             if t.is_kill:
                 self._record_best()
             self._maybe_upload()
+            self._record_completion()
 
         # Back-to-back: after a finished run, re-arm for the next one without the
         # user clicking reset - once they leave the dungeon, or after a short
@@ -291,15 +311,26 @@ class SpeedrunOverlay(OverlayWindow):
             self._dg_icon.hide()
 
     def _record_best(self):
+        """Persist new PBs for a confirmed kill: the FULL-run best and the
+        BOSS-split best are tracked separately (boss time is the headline metric)."""
         bid = self.timer.boss_id or "_"
+        saved = False
         cur = self.timer.last
-        if cur is None:
-            return
-        best = self.s.speedrun_best.get(bid)
-        if best is None or cur < best:
-            self.s.speedrun_best[bid] = cur
+        if cur is not None:
+            best = self.s.speedrun_best.get(bid)
+            if best is None or cur < best:
+                self.s.speedrun_best[bid] = cur
+                self.timer.is_new_best = True
+                saved = True
+        bcur = self.boss_timer.last
+        if bcur is not None and self.boss_timer.state == BossTimer.DONE:
+            bbest = self.s.speedrun_boss_best.get(bid)
+            if bbest is None or bcur < bbest:
+                self.s.speedrun_boss_best[bid] = bcur
+                self.boss_is_new_best = True
+                saved = True
+        if saved:
             self.s.save()
-            self.timer.is_new_best = True
 
     def _maybe_upload(self):
         """On finish: auto-upload ONLY a confirmed boss kill (and only if enabled);
@@ -338,6 +369,32 @@ class SpeedrunOverlay(OverlayWindow):
         else:
             self._upload_btn.show()   # manual: user clicks to upload
 
+    def _record_completion(self):
+        """Bump the player's true per-dungeon run counter on the website for any
+        CONFIRMED clear (auto-detected boss kill), independent of the leaderboard:
+        a non-PB or Normal run still counts as "you ran this dungeon". Fire-and-
+        forget, one ping per run, idempotent server-side via the shared run id."""
+        if self._completion_sent or not self.s.account_token:
+            return
+        if not self.timer.is_kill:                 # only genuine clears count
+            return
+        bid = self.timer.boss_id or self._dungeon_bid
+        last = self.timer.last
+        if not bid or last is None:
+            return
+        self._completion_sent = True
+        slug = bid.lower()
+        mode = self._run_mode or self._resolve_mode()[0]
+        full_ms = int(round(last * 1000))
+        boss_ms = int(round(self.boss_timer.last * 1000)) if self.boss_timer.last is not None else None
+        base, token, cid = self.s.api_base, self.s.account_token, self._client_run_id
+
+        def work():
+            FareverAPI(base, token).record_completion(
+                slug, mode=mode, full_ms=full_ms, boss_ms=boss_ms, client_run_id=cid)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _on_run_aborted(self):
         """Player left the dungeon / hit the main menu mid-run: cancel the run
         without recording a time or uploading anything."""
@@ -349,11 +406,14 @@ class SpeedrunOverlay(OverlayWindow):
         self._latch.reset()
         self._done_ctr = 0
         self._uploaded = False
+        self._completion_sent = False
+        self.boss_is_new_best = False
         self._run_mode = None
         self._run_mode_src = None
         self._upload_btn.hide()
         self.warn_lbl.hide()
         self.sub_lbl.hide()
+        self.full_pb_lbl.hide()
         self.upload_lbl.setText("run cancelled — left the dungeon (no upload)")
         self.upload_lbl.setStyleSheet(f"color:{theme.MUTED};background:transparent;")
         self.upload_lbl.show()
@@ -392,7 +452,7 @@ class SpeedrunOverlay(OverlayWindow):
         # Per-run build override (Speedrun tab): when on, attach this build code;
         # otherwise the server links the player's profile featured build.
         build_code = (self.s.speedrun_build_override or "").strip() if self.s.speedrun_build_override_on else ""
-        cid = secrets.token_hex(8)
+        cid = self._client_run_id or secrets.token_hex(8)
         splits = [("full", int(round(last * 1000)))]
         if self.boss_timer.last is not None:
             splits.append(("boss", int(round(self.boss_timer.last * 1000))))
@@ -457,7 +517,7 @@ class SpeedrunOverlay(OverlayWindow):
         # run; the full run then drops to the small secondary line below.
         if boss_armed:
             self.time_lbl.setText(fmt_time(bt.elapsed()))
-            self._style_time(theme.GOLD if (t.state != t.DONE or t.is_new_best) else theme.GOOD)
+            self._style_time(theme.GOLD if (t.state != t.DONE or self.boss_is_new_best) else theme.GOOD)
             self.sub_lbl.setText(f"FULL  {fmt_time(t.elapsed())}")
             self.sub_lbl.setStyleSheet(
                 f"color:{theme.MUTED};font-family:'{theme.MONO_FONT}','Consolas';"
@@ -480,16 +540,31 @@ class SpeedrunOverlay(OverlayWindow):
         self._render_mode()
         self._render_warn()
 
+        self._render_records(boss_armed)
+
+    def _render_records(self, boss_armed: bool):
+        """Draw the record lines from the pure record_lines() decision: BOSS PB/LAST
+        as the headline, the full-run PB on a smaller secondary line below."""
+        t = self.timer
         bid = t.boss_id or "_"
-        best = self.s.speedrun_best.get(bid)
-        parts = []
-        if t.state == t.DONE and t.is_new_best:
-            parts.append("★ NEW BEST")
-        if best is not None:
-            parts.append(f"PB {fmt_time(best)}")
-        if t.last is not None:
-            parts.append(f"LAST {fmt_time(t.last)}")
-        self.pb_lbl.setText("   ·   ".join(parts) or "no record yet")
+        primary, secondary = record_lines(
+            done=(t.state == t.DONE),
+            boss_armed=boss_armed,
+            boss_last=self.boss_timer.last,
+            full_last=t.last,
+            boss_best=self.s.speedrun_boss_best.get(bid),
+            full_best=self.s.speedrun_best.get(bid),
+            boss_is_new_best=self.boss_is_new_best,
+            full_is_new_best=t.is_new_best,
+        )
+        self.pb_lbl.setText(primary)
+        if secondary:
+            self.full_pb_lbl.setText(secondary)
+            self.full_pb_lbl.setStyleSheet(
+                f"color:{theme.MUTED};background:transparent;font-size:11px;")
+            self.full_pb_lbl.show()
+        else:
+            self.full_pb_lbl.hide()
 
     def _render_mode(self):
         """The difficulty readout: what a finished run uploads as + how it was

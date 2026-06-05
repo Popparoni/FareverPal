@@ -116,7 +116,8 @@ class Settings:
     hotkey_speedrun_toggle: str = "Ctrl+Alt+T"   # start / stop the run timer
     hotkey_speedrun_reset: str = "Ctrl+Alt+R"    # reset to 00:00
     speedrun_scale: float = 1.0
-    speedrun_best: dict = field(default_factory=dict)  # boss unit_id -> best seconds
+    speedrun_best: dict = field(default_factory=dict)  # boss unit_id -> best FULL-run seconds
+    speedrun_boss_best: dict = field(default_factory=dict)  # boss unit_id -> best BOSS-split seconds
     # speedrun automation - ONE master toggle: detect the dungeon (boss in scene),
     # auto-start the timer on the player's first move, auto-stop on boss kill, AND
     # auto-detect the Normal/Hard difficulty from the live boss level (Hard scales

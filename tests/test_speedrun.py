@@ -3,7 +3,7 @@
 Guards the leaderboard-integrity bug: leaving the dungeon (boss despawns at full
 HP, e.g. going to the main menu) must CANCEL the run, never auto-finish + upload.
 """
-from farever_companion.core.speedrun import AutoStarter, BossTimer, Encounter, ModeLatch
+from farever_companion.core.speedrun import AutoStarter, BossTimer, Encounter, ModeLatch, record_lines
 from farever_companion.core.speedrun import SpeedrunTimer as T
 from farever_companion.data import encounters
 
@@ -272,3 +272,50 @@ def test_resolve_cleodora_is_engage_any():
     assert kill_id == "Cleodora"
     assert members == {"Cleodora"}
     assert engage_any is True
+
+
+# --- record_lines: BOSS time is the headline at finish ------------------------
+
+def test_record_lines_finished_boss_primary_full_secondary():
+    # Finished run with a boss split: boss PB/LAST headline, full PB on the 2nd line.
+    primary, secondary = record_lines(
+        done=True, boss_armed=True, boss_last=102.18, full_last=235.40,
+        boss_best=99.02, full_best=231.7, boss_is_new_best=False, full_is_new_best=False)
+    assert "PB 01:39.02" in primary and "LAST 01:42.18" in primary
+    assert "full PB" not in primary                     # full stays off the headline
+    assert secondary is not None and "full PB 03:51.70" in secondary
+    assert "full 03:55.40" in secondary                 # the just-finished full time
+
+
+def test_record_lines_boss_new_best_star_uses_boss():
+    primary, _ = record_lines(
+        done=True, boss_armed=True, boss_last=90.0, full_last=200.0,
+        boss_best=90.0, full_best=200.0, boss_is_new_best=True, full_is_new_best=False)
+    assert primary.startswith("★ NEW BEST")            # the star tracks the BOSS PB
+
+
+def test_record_lines_falls_back_to_full_when_no_boss_split():
+    # Dungeon with no boss split (timer never armed, no stored boss PB): full only.
+    primary, secondary = record_lines(
+        done=True, boss_armed=False, boss_last=None, full_last=235.40,
+        boss_best=None, full_best=231.7, boss_is_new_best=False, full_is_new_best=True)
+    assert secondary is None
+    assert primary.startswith("★ NEW BEST")
+    assert "PB 03:51.70" in primary and "LAST 03:55.40" in primary
+
+
+def test_record_lines_running_no_last_yet():
+    # No finished times anywhere yet → "no record yet", nothing secondary.
+    primary, secondary = record_lines(
+        done=False, boss_armed=False, boss_last=None, full_last=None,
+        boss_best=None, full_best=None, boss_is_new_best=False, full_is_new_best=False)
+    assert primary == "no record yet" and secondary is None
+
+
+def test_record_lines_boss_pb_shown_before_first_finish():
+    # A stored boss PB makes the line boss-primary even when this run hasn't armed.
+    primary, secondary = record_lines(
+        done=False, boss_armed=False, boss_last=None, full_last=None,
+        boss_best=99.02, full_best=None, boss_is_new_best=False, full_is_new_best=False)
+    assert primary == "PB 01:39.02"                     # no LAST (no run finished), no star
+    assert secondary is None

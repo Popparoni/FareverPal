@@ -98,6 +98,23 @@ class FareverAPI:
             body["client_run_id"] = client_run_id
         return self._request("POST", "/api/speedrun/submit.php", body, auth=True)
 
+    def record_completion(self, category: str, mode: str = "hard", full_ms: int = 0,
+                          boss_ms: int | None = None, client_run_id: str = "") -> dict:
+        """Bump the player's true per-dungeon run counter (and best times) for a
+        confirmed clear, independent of the leaderboard. Idempotent server-side via
+        `client_run_id`, so a retry never double-counts. -> {ok, runs, best_full_ms,
+        best_boss_ms} | {ok:False, error}."""
+        body = {
+            "category": category,
+            "mode": mode,
+            "full_ms": int(full_ms),
+        }
+        if boss_ms is not None:
+            body["boss_ms"] = int(boss_ms)
+        if client_run_id:
+            body["client_run_id"] = client_run_id
+        return self._request("POST", "/api/speedrun/complete.php", body, auth=True)
+
     def lookup_build(self, code: str) -> dict:
         """Resolve a build code to its display chip (for the Speedrun-tab preview).
         -> {ok, code, title, class, icon, mine} | {ok:False}. Requires auth."""
