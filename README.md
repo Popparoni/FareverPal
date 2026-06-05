@@ -95,7 +95,7 @@ package.bat      :: runs PyInstaller -> dist\FareverPal.exe (bundles sheets + ic
 ```
 
 `package.bat` contains the full PyInstaller command. The resulting
-`dist\FareverPal.exe` (~305 MB, self-contained) is published as a GitHub
+`dist\FareverPal.exe` (~105 MB, self-contained) is published as a GitHub
 **release asset**, not committed to the repo.
 
 ## Use
