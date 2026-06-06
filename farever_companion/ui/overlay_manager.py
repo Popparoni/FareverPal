@@ -38,6 +38,9 @@ class OverlayManager(QtCore.QObject):
         self.model = None       # set by the panel on attach; None when detached
         self.overlays: dict[str, QtWidgets.QWidget | None] = {}
         self.cards: dict[str, list] = {}
+        # account collection state (None = signed out / unknown); the entity
+        # overlay marks wild companions that aren't collected yet
+        self.collection_owned: set | None = None
 
     # --- toggle cards ----------------------------------------------------
     def register_card(self, key: str, card) -> None:
@@ -66,6 +69,8 @@ class OverlayManager(QtCore.QObject):
         ov = _OVERLAY_CLASSES[key](self.model, self.s)
         if hasattr(ov, "request_config"):
             ov.request_config.connect(self.request_config)
+        if hasattr(ov, "set_collection_owned"):
+            ov.set_collection_owned(self.collection_owned)
         return ov
 
     def request(self, key: str, on: bool) -> None:
@@ -120,6 +125,12 @@ class OverlayManager(QtCore.QObject):
                 ov.set_locked(on)
         self.log.emit("Overlays LOCKED (click-through)." if on
                       else "Overlays unlocked (interactive).")
+
+    def set_collection_owned(self, owned: set | None) -> None:
+        self.collection_owned = owned
+        for ov in self.overlays.values():
+            if ov is not None and hasattr(ov, "set_collection_owned"):
+                ov.set_collection_owned(owned)
 
     def apply_accent(self, color) -> None:
         for ov in self.overlays.values():

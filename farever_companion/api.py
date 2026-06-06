@@ -126,6 +126,19 @@ class FareverAPI:
         body.update({k: v for k, v in fields.items() if k in ("video_url", "title", "notes")})
         return self._request("POST", "/api/speedrun/edit.php", body, auth=True)
 
+    # ---- collection tracker ---------------------------------------------
+    def collection_list(self) -> dict:
+        """The account's collected item ids + per-category progress.
+        -> {ok, owned:[id,...], summary:{cat:{label,collected,total},...,_overall}}."""
+        return self._request("GET", "/api/collection/list.php", auth=True)
+
+    def collection_set(self, add: list | None = None, remove: list | None = None) -> dict:
+        """Check/uncheck catalog items (bulk, idempotent; unknown ids dropped
+        server-side). -> {ok, added, removed, summary} | {ok:False, error}."""
+        return self._request("POST", "/api/collection/set.php",
+                             {"add": list(add or []), "remove": list(remove or [])},
+                             auth=True)
+
     # ---- friends + presence -------------------------------------------
     def friends_list(self) -> dict:
         """-> {ok, friends:[{public_id, username, avatar_url, presence, ...}], incoming_count}."""

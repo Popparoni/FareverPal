@@ -260,6 +260,7 @@ class EntityOverlay(OverlayWindow):
         self.s = settings
         self._enemies: list = []          # [(entity, dist)]
         self._chests: list = []           # [ChestRow]
+        self._owned: set | None = None    # account collection (None = signed out)
         self._sel = None                  # ("enemy", addr) | ("chest", chest_id)
         self._drop_win: DropTableOverlay | None = None
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
@@ -280,8 +281,9 @@ class EntityOverlay(OverlayWindow):
         scroll, self._body = _scroll_body()
         self.content.addWidget(scroll, 1)
         self.enemy_box = _Section("ENEMIES", theme.DANGER)
+        self.comp_box = _Section("COMPANIONS", theme.GOOD)
         self.chest_box = _Section("CHESTS", theme.CHEST)
-        for b in (self.enemy_box, self.chest_box):
+        for b in (self.enemy_box, self.comp_box, self.chest_box):
             self._body.addWidget(b)
         self._body.addStretch(1)
 
@@ -296,6 +298,7 @@ class EntityOverlay(OverlayWindow):
         for b in (gear, layb):
             self.titlebar.extra.insertWidget(self.titlebar.extra.count() - 1, b)
 
+        self.enable_resize_grip()
         self._base_w, self._base_h = 320, 440
         self.setMinimumWidth(round(280 * self.s.entity_scale))
         self.apply_scale(self.s.entity_scale)     # scaled QSS + resize to base*scale
@@ -393,6 +396,9 @@ class EntityOverlay(OverlayWindow):
         if self._drop_win is not None:
             self._drop_win.apply_scale(scale)
 
+    def set_collection_owned(self, owned: set | None) -> None:
+        self._owned = owned
+
     def _open_drops(self):
         if self._sel is None:
             return
@@ -426,7 +432,8 @@ class EntityOverlay(OverlayWindow):
 
         # 1) gather both lists
         self._enemies = self.model.nearest_enemies(
-            xyz, self.s.enemy_count, self.s.max_dist, self.s.enemies_only) \
+            xyz, self.s.enemy_count, self.s.max_dist, self.s.enemies_only,
+            hide_types=set(self.s.entity_hidden_types)) \
             if self.s.show_enemies else []
         self._chests = self.model.nearest_chests_merged(
             xyz, self.s.chest_count, self.s.max_dist) if self.s.show_chests else []
@@ -449,11 +456,48 @@ class EntityOverlay(OverlayWindow):
                     value=f"{d:.0f}m", bold=sel, highlight=sel,
                     cb=(lambda k=key: self._select(*k))))
             self.enemy_box.fill(specs, isz)
-            self.enemy_box.header.set_tag(f"{len(self._enemies)} · ↑↓ SELECT")
+            # honest empty-state: a failed read (zone swap) is not "no enemies"
+            if not getattr(self.model, "units_ok", True):
+                tag = "READ FAILED · RETRYING"
+            elif not self._enemies:
+                tag = "0 · NONE LOADED"
+            else:
+                tag = f"{len(self._enemies)} · ↑↓ SELECT"
+            self.enemy_box.header.set_tag(tag)
         else:
             self.enemy_box.hide()
 
-        # 4) render chests (also selectable -> show their loot table)
+        # 4) render wild companions (critters) - their own section, never
+        # enemies, never distance-capped. Ones missing from the account
+        # collection get flagged.
+        if self.s.show_companions:
+            comps = self.model.nearest_companions(xyz, self.s.companion_count)
+            self.comp_box.show()
+            specs = []
+            n_new = 0
+            for e, d in comps:
+                missing = self._owned is not None and e.unit_id not in self._owned
+                n_new += missing
+                col = theme.GOLD if missing else theme.GOOD
+                specs.append(RowSpec(
+                    "unit", e.unit_id, col,
+                    names.unit_name(e.unit_id) or names.humanize(e.unit_id), col,
+                    sub="★ NOT COLLECTED" if missing else "",
+                    value=f"{d:.0f}m", bold=missing, highlight=missing))
+            self.comp_box.fill(specs, isz)
+            if not getattr(self.model, "units_ok", True):
+                tag = "READ FAILED · RETRYING"
+            elif not comps:
+                tag = "0 · NONE LOADED"
+            else:
+                tag = f"{len(comps)} · WILD"
+                if n_new:
+                    tag += f" · ★{n_new} NEW"
+            self.comp_box.header.set_tag(tag)
+        else:
+            self.comp_box.hide()
+
+        # 5) render chests (also selectable -> show their loot table)
         if self.s.show_chests:
             self.chest_box.show()
             specs = []
@@ -486,7 +530,7 @@ class EntityOverlay(OverlayWindow):
         else:
             self.chest_box.hide()
 
-        # 5) keep the open drop window synced with live selection / auto-flip
+        # 6) keep the open drop window synced with live selection / auto-flip
         self._update_drops()
 
     def closeEvent(self, e):

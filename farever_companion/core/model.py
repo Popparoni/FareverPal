@@ -51,6 +51,7 @@ class LiveModel:
         self.player_max_hp: float = 0.0
         self.deaths: int = 0
         self._was_alive: bool = False
+        self.units_ok: bool = True   # False while the units read fails (zone swap)
 
     # --- lifecycle -------------------------------------------------------
     def locate_player(self) -> int | None:
@@ -135,8 +136,10 @@ class LiveModel:
             return self._units_cache
         try:
             self._units_cache = self.scene.units(self.player_addr)
+            self.units_ok = True
         except ProcError:
             self._units_cache = []
+            self.units_ok = False
         self._units_at = now
         # boss of the current instance, cleared when none present so a prior
         # dungeon's boss can't linger
@@ -148,14 +151,34 @@ class LiveModel:
     def enemies(self) -> list[Entity]:
         return [e for e in self.units() if e.is_enemy]
 
-    def nearest_enemies(self, xyz: XYZ, n: int, max_dist: float = 0.0,
-                        enemies_only: bool = True):
-        pool = [e for e in self.units()
-                if (e.is_enemy if enemies_only else (e.is_foe or e.is_hero))]
+    @staticmethod
+    def _ranked(pool: list[Entity], xyz: XYZ, n: int, max_dist: float):
         ranked = sorted(((e, e.dist(*xyz)) for e in pool), key=lambda t: t[1])
         if max_dist > 0:
             ranked = [(e, d) for e, d in ranked if d <= max_dist]
         return ranked[:n]
+
+    def nearest_enemies(self, xyz: XYZ, n: int, max_dist: float = 0.0,
+                        enemies_only: bool = True,
+                        hide_types: set[str] | None = None):
+        # wild companions (critters) are ent.Foe but not enemies - they get
+        # their own list (nearest_companions)
+        pool = [e for e in self.units()
+                if (e.is_enemy if enemies_only else (e.is_foe or e.is_hero))
+                and not udata.is_companion(e.unit_id)]
+        if hide_types:
+            pool = [e for e in pool if udata.unit_type(e.unit_id) not in hide_types]
+        return self._ranked(pool, xyz, n, max_dist)
+
+    def nearest_companions(self, xyz: XYZ, n: int):
+        """Wild catchable companions (critters) near the player. Player-owned
+        ones (equipped pets, own or other players') are excluded. Deliberately
+        ignores the max-distance cap: critters are sparse and collectors want
+        them visible from anywhere in the loaded scene."""
+        pool = [e for e in self.units()
+                if e.is_foe and udata.is_companion(e.unit_id)
+                and not e.is_player_owned]
+        return self._ranked(pool, xyz, n, 0.0)
 
     def live_chests(self) -> list[Element]:
         try:

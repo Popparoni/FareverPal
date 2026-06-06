@@ -19,13 +19,14 @@ from . import theme
 from .overlay_base import OverlayWindow
 from .. import __version__
 from ..core.speedrun import (
-    SpeedrunTimer, BossTimer, Encounter, AutoStarter, ModeLatch, fmt_time, record_lines)
+    SpeedrunTimer, BossTimer, Encounter, AutoStarter, ModeLatch, RearmGate,
+    fmt_time, record_lines)
 from ..data import names, icons
 from ..api import FareverAPI
 
 TICK_MS = 50           # centisecond-smooth display + boss poll while running
 DETECT_EVERY = 10      # run the (heavier) dungeon detection every Nth tick (~500ms)
-REARM_TICKS = 100      # ~5s after a finish, re-arm for the next run (back-to-back)
+# (back-to-back re-arm timing lives in core.speedrun.RearmGate)
 
 
 class SpeedrunOverlay(OverlayWindow):
@@ -44,7 +45,7 @@ class SpeedrunOverlay(OverlayWindow):
         self._in_dungeon = False                # boss currently present in the scene
         self._starter = AutoStarter()           # settle-baseline auto-start decision (pure)
         self._latch = ModeLatch()               # last good auto-detected difficulty this run
-        self._done_ctr = 0                      # ticks since a finish (for back-to-back re-arm)
+        self._rearm = RearmGate()               # holds the finished result until the player leaves
         self._uploaded = False                  # guard: one upload per finished run
         self._completion_sent = False           # guard: one per-dungeon completion ping per run
         self._client_run_id = ""                # shared id tying the upload + completion ping
@@ -158,7 +159,7 @@ class SpeedrunOverlay(OverlayWindow):
             self.encounter.reset()
         self._starter.reset()
         self._latch.reset()
-        self._done_ctr = 0
+        self._rearm.reset()
         self._uploaded = False
         self._completion_sent = False
         self.boss_is_new_best = False
@@ -261,7 +262,7 @@ class SpeedrunOverlay(OverlayWindow):
         # now, so a fresh read often can't see it). PB + auto-upload only count a
         # CONFIRMED kill (a manual stop must never set a bogus PB or auto-submit).
         if t.state == t.DONE and self._prev_state != t.DONE:
-            self._done_ctr = 0
+            self._rearm.reset()                          # grace counts from the finish
             self._client_run_id = secrets.token_hex(8)   # ties the upload + completion ping
             # Freeze the boss split too (a manual stop won't have hit the kill path).
             if self.boss_timer.state == BossTimer.RUNNING:
@@ -273,11 +274,16 @@ class SpeedrunOverlay(OverlayWindow):
             self._record_completion()
 
         # Back-to-back: after a finished run, re-arm for the next one without the
-        # user clicking reset - once they leave the dungeon, or after a short
-        # grace so the finished time is readable first. Toggleable.
+        # user clicking reset. NOT keyed on boss presence - the boss despawns on
+        # death, which used to wipe the finished times within a tick of the kill.
+        # The RearmGate holds the result until the player actually leaves (exit
+        # teleport / load screen) or a generous grace passes. Toggleable.
         if t.state == t.DONE and self.s.speedrun_auto_rearm:
-            self._done_ctr += 1
-            if (not self._in_dungeon) or self._done_ctr >= REARM_TICKS:
+            try:
+                pos = self.model.player_xyz() if self.model is not None else None
+            except Exception:
+                pos = None
+            if self._rearm.feed(pos):
                 self.reset()
 
         self._prev_state = t.state
@@ -404,7 +410,7 @@ class SpeedrunOverlay(OverlayWindow):
             self.encounter.reset()
         self._starter.reset()
         self._latch.reset()
-        self._done_ctr = 0
+        self._rearm.reset()
         self._uploaded = False
         self._completion_sent = False
         self.boss_is_new_best = False
@@ -503,6 +509,22 @@ class SpeedrunOverlay(OverlayWindow):
         self.upload_lbl.show()
 
     # --- render ----------------------------------------------------------
+    def _fit(self):
+        """Responsive sizing: grow/shrink the panel to the widest visible line so
+        nothing clips (the FINISHED · BOSS · <name> line, PB/LAST, the full-PB
+        line), and let the height follow the content (word-wrapped status labels
+        included via heightForWidth). The base size is the floor, never a cap."""
+        pad = 22   # content margins (8+8) + card border (1+1) + breathing room
+        lines = (self.time_lbl, self.sub_lbl, self.state_lbl, self.mode_lbl,
+                 self.pb_lbl, self.full_pb_lbl)
+        need = max((l.sizeHint().width() for l in lines if not l.isHidden()), default=0) + pad
+        w = max(self.minimumWidth(), round(self._base_w * self._scale), need)
+        lay = self.layout()
+        h = lay.totalHeightForWidth(w) if lay.hasHeightForWidth() else self.sizeHint().height()
+        h = max(h, round(self._base_h * self._scale))
+        if w != self.width() or h != self.height():
+            self.resize(w, h)
+
     def _style_time(self, color: str):
         size = max(18, int(40 * float(self.s.speedrun_scale or 1.0)))  # scale with the overlay zoom
         self.time_lbl.setStyleSheet(
@@ -541,6 +563,7 @@ class SpeedrunOverlay(OverlayWindow):
         self._render_warn()
 
         self._render_records(boss_armed)
+        self._fit()
 
     def _render_records(self, boss_armed: bool):
         """Draw the record lines from the pure record_lines() decision: BOSS PB/LAST

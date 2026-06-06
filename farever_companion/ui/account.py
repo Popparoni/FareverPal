@@ -225,6 +225,7 @@ class AccountMixin:
         if hasattr(self, "_build_profile_lbl"):
             self._refresh_profile_build()
         self._refresh_friends_gating()
+        self._refresh_collection_gating()
 
     def _account_avatar_pixmap(self, size: int) -> QtGui.QPixmap:
         if self._avatar_pm is not None and not self._avatar_pm.isNull():

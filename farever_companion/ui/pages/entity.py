@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6 import QtGui, QtWidgets
 from .. import components as C
-from ...data import loot
+from ...data import loot, units
 
 class EntityPageMixin:
     def _page_entity(self):
@@ -18,8 +18,9 @@ class EntityPageMixin:
         grid.setVerticalSpacing(8)
         toggles = [
             ("show_enemies", "Enemies"), ("show_chests", "Chests"),
-            ("show_gatherables", "Gatherables"), ("show_drops", "Closest drops"),
-            ("enemies_only", "Enemies only"), ("class_only", "Class-relevant only"),
+            ("show_companions", "Wild companions"), ("show_gatherables", "Gatherables"),
+            ("show_drops", "Closest drops"), ("enemies_only", "Enemies only"),
+            ("class_only", "Class-relevant only"),
         ]
         for i, (attr, label) in enumerate(toggles):
             t = C.LabeledToggle(label, getattr(self.s, attr))
@@ -35,13 +36,15 @@ class EntityPageMixin:
         srow.setHorizontalSpacing(12)
         srow.setVerticalSpacing(10)
         steppers = [
-            ("enemy_count", "Enemies shown", 1, 30),
-            ("chest_count", "Chests shown", 1, 30),
-            ("icon_size", "Icon size (px)", 12, 64),
-            ("level", "Predict level", 1, 60),
+            ("enemy_count", "Enemies shown", 1, 30, 1),
+            ("chest_count", "Chests shown", 1, 30, 1),
+            ("companion_count", "Companions shown", 1, 30, 1),
+            ("icon_size", "Icon size (px)", 12, 64, 1),
+            ("level", "Predict level", 1, 60, 1),
+            ("max_dist", "Max distance m (0 = off)", 0, 1000, 25),
         ]
-        for i, (attr, label, lo, hi) in enumerate(steppers):
-            st = C.Stepper(getattr(self.s, attr), lo, hi)
+        for i, (attr, label, lo, hi, step) in enumerate(steppers):
+            st = C.Stepper(int(getattr(self.s, attr)), lo, hi, step)
             st.valueChanged.connect(lambda v_, a=attr: self._set(a, v_))
             srow.addWidget(C.Field(label, st), i // 2, i % 2)
         right.addLayout(srow)
@@ -50,6 +53,19 @@ class EntityPageMixin:
         cols.addLayout(left, 1)
         cols.addLayout(right, 1)
         v.addLayout(cols)
+
+        v.addWidget(C.SectionHeader("Enemy Type Filter", tag="UNCHECKED = HIDDEN"))
+        hidden = set(self.s.entity_hidden_types)
+        chips = QtWidgets.QGridLayout()
+        chips.setHorizontalSpacing(6)
+        chips.setVerticalSpacing(6)
+        # Critter = the wild-companion section, which has its own toggle
+        types = [t for t in units.unit_types() if t != units.COMPANION_TYPE]
+        for i, utype in enumerate(types):
+            chip = C.FilterChip(utype, utype not in hidden)
+            chip.toggled.connect(lambda on, t=utype: self._set_type_hidden(t, not on))
+            chips.addWidget(chip, i // 6, i % 6)
+        v.addLayout(chips)
 
         esc = C.SliderRow("Overlay scale", 70, 160, int(self.s.entity_scale * 100),
                           lambda x: f"{x / 100:.2f}x")
@@ -73,3 +89,9 @@ class EntityPageMixin:
         v.addLayout(hk)
         v.addStretch(1)
         return page
+
+    def _set_type_hidden(self, utype: str, hidden: bool) -> None:
+        cur = set(self.s.entity_hidden_types)
+        (cur.add if hidden else cur.discard)(utype)
+        self.s.entity_hidden_types = sorted(cur)
+        self.s.save()

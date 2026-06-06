@@ -256,6 +256,46 @@ class AutoStarter:
         return False
 
 
+class RearmGate:
+    """Decides when a FINISHED run re-arms (resets) for a back-to-back next run.
+
+    The old rule reset the HUD as soon as the kill boss was no longer in the
+    scene - but the boss DESPAWNS on death, so the finished boss+full times were
+    wiped within a tick of the kill, before they could be read. Instead the
+    result is held on screen and the HUD re-arms only when the player actually
+    LEAVES the dungeon: the exit is a teleport (a big single-tick position jump,
+    same scale AutoStarter uses) or a load screen (position unreadable for a
+    couple of seconds). A long grace is the fallback - re-running a dungeon
+    requires leaving it anyway, so holding the result costs nothing.
+    Pure + headless, like AutoStarter."""
+
+    TELEPORT_STEP = 50.0    # single-tick jump bigger than this = left via teleport
+    NONE_TICKS = 40         # ~2s of unreadable position = load screen / main menu
+    GRACE_TICKS = 600       # ~30s fallback: result stays readable while looting
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._last = None       # previous tick position
+        self._none = 0          # consecutive unreadable-position ticks
+        self._ticks = 0         # ticks since the finish
+
+    def feed(self, pos) -> bool:
+        """One overlay tick while the timer is DONE; True = re-arm now."""
+        self._ticks += 1
+        if self._ticks >= self.GRACE_TICKS:
+            return True
+        if pos is None:
+            self._none += 1
+            return self._none >= self.NONE_TICKS
+        self._none = 0
+        if self._last is not None and AutoStarter._dist(pos, self._last) > self.TELEPORT_STEP:
+            return True
+        self._last = pos
+        return False
+
+
 class ModeLatch:
     """Latches the last confidently auto-detected difficulty *during* a run.
 

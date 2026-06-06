@@ -175,9 +175,7 @@ class DpsOverlay(OverlayWindow):
 
         self.content.addStretch(1)
 
-        self._grip = QtWidgets.QSizeGrip(self)
-        self._grip.setFixedSize(16, 16)
-        self._grip.setToolTip("Drag to resize")
+        self.enable_resize_grip()
 
         self.setMinimumWidth(round(220 * self.s.dps_scale))
         self.apply_dps_mode(self.s.dps_mode)
@@ -363,13 +361,6 @@ class DpsOverlay(OverlayWindow):
             self.sub.setText(f"exported -> {path.rsplit('/', 1)[-1]}")
         except OSError as e:
             self.sub.setText(f"export failed: {e}")
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        g = getattr(self, "_grip", None)
-        if g is not None:
-            g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
-            g.raise_()
 
     def closeEvent(self, e):
         self._timer.stop()

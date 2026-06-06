@@ -556,6 +556,30 @@ class LabeledToggle(QtWidgets.QFrame):
         return self._toggle.isChecked()
 
 
+# --- filter chip (compact checkable tag for multi-select filters) ----------
+class FilterChip(QtWidgets.QPushButton):
+    """Checked = included, unchecked = filtered out. Flat, sharp."""
+
+    def __init__(self, label: str, checked: bool = True, parent=None):
+        super().__init__(label, parent)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.toggled.connect(lambda _on: self.restyle())
+        self.restyle()
+
+    def restyle(self) -> None:
+        if self.isChecked():
+            self.setStyleSheet(
+                f"QPushButton{{background:{theme.with_alpha(theme.ACCENT, 36)};"
+                f"color:{theme.ACCENT};border:1px solid {theme.ACCENT};"
+                f"border-radius:0;padding:4px 10px;font-weight:600;}}")
+        else:
+            self.setStyleSheet(
+                f"QPushButton{{background:transparent;color:{theme.DIM};"
+                f"border:1px solid {theme.BORDER};border-radius:0;padding:4px 10px;}}")
+
+
 # --- field (label above a control) ----------------------------------------
 class Field(QtWidgets.QWidget):
     """UPPERCASE mono field label stacked above its control."""

@@ -3,7 +3,8 @@
 Guards the leaderboard-integrity bug: leaving the dungeon (boss despawns at full
 HP, e.g. going to the main menu) must CANCEL the run, never auto-finish + upload.
 """
-from farever_companion.core.speedrun import AutoStarter, BossTimer, Encounter, ModeLatch, record_lines
+from farever_companion.core.speedrun import (
+    AutoStarter, BossTimer, Encounter, ModeLatch, RearmGate, record_lines)
 from farever_companion.core.speedrun import SpeedrunTimer as T
 from farever_companion.data import encounters
 
@@ -272,6 +273,50 @@ def test_resolve_cleodora_is_engage_any():
     assert kill_id == "Cleodora"
     assert members == {"Cleodora"}
     assert engage_any is True
+
+
+# --- RearmGate: the finished result must stay readable after the kill ---------
+
+def test_rearm_holds_through_boss_despawn():
+    # The bug: the boss despawns on death; that must NOT re-arm (wipe) the result.
+    # Standing still in the cleared dungeon keeps the times on screen.
+    g = RearmGate()
+    for _ in range(200):                                  # ~10s of looting
+        assert g.feed((10.0, 10.0, 0.0)) is False
+
+
+def test_rearm_small_movement_keeps_result():
+    g = RearmGate()
+    for i in range(100):                                  # walking around the room
+        assert g.feed((10.0 + i * 0.4, 10.0, 0.0)) is False
+
+
+def test_rearm_on_exit_teleport():
+    g = RearmGate()
+    assert g.feed((10.0, 10.0, 0.0)) is False
+    assert g.feed((900.0, 900.0, 0.0)) is True            # ported out -> re-arm now
+
+
+def test_rearm_on_load_screen():
+    g = RearmGate()
+    g.feed((10.0, 10.0, 0.0))
+    for _ in range(RearmGate.NONE_TICKS - 1):             # position unreadable…
+        assert g.feed(None) is False
+    assert g.feed(None) is True                           # …long enough = left
+
+
+def test_rearm_transient_read_failure_is_not_a_leave():
+    g = RearmGate()
+    g.feed((10.0, 10.0, 0.0))
+    for _ in range(5):                                    # brief read hiccup
+        assert g.feed(None) is False
+    assert g.feed((10.0, 10.0, 0.0)) is False             # recovered -> still held
+
+
+def test_rearm_grace_expiry():
+    g = RearmGate()
+    fired = [g.feed((10.0, 10.0, 0.0)) for _ in range(RearmGate.GRACE_TICKS)]
+    assert fired[-1] is True and not any(fired[:-1])      # exactly at the grace
 
 
 # --- record_lines: BOSS time is the headline at finish ------------------------

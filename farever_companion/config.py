@@ -46,6 +46,11 @@ class Settings:
     enemies_only: bool = True
     enemy_count: int = 8
     chest_count: int = 6
+    # wild catchable companions (critters) as their own HUD section
+    show_companions: bool = True
+    companion_count: int = 6
+    # unitType ids hidden from the entity HUD's enemy list ([] = show all)
+    entity_hidden_types: list = field(default_factory=list)
     max_dist: float = 0.0            # 0 = no cap
     icon_size: int = 28
     opacity: float = 0.92

@@ -28,6 +28,7 @@ from .pages.loot import LootPageMixin
 from .pages.crosshair import CrosshairPageMixin
 from .pages.map_page import MapPageMixin
 from .pages.log import LogPageMixin
+from .pages.collection import CollectionPageMixin
 from ..config import Settings
 from ..core.proc import backend_name
 from ..core import updater
@@ -43,6 +44,7 @@ NAV = [
     ("combat", "swords", "Combat / DPS"),
     ("speedrun", "timer", "Speedrun"),
     ("loot", "box", "Loot"),
+    ("collection", "archive", "Collection"),
     ("crosshair", "crosshair", "Crosshair"),
     ("map", "map", "Map"),
     ("friends", "users", "Friends"),
@@ -53,8 +55,8 @@ CLASSES = ["Auto", "Warrior", "Rogue", "Mage", "Priest", "Off"]
 
 class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
                    OverlaysPageMixin, EntityPageMixin, CombatPageMixin,
-                   LootPageMixin, CrosshairPageMixin, MapPageMixin, LogPageMixin,
-                   QtWidgets.QMainWindow):
+                   LootPageMixin, CollectionPageMixin, CrosshairPageMixin,
+                   MapPageMixin, LogPageMixin, QtWidgets.QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
         self.s = settings
@@ -73,6 +75,11 @@ class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
         # friends + presence
         self._friends: list = []
         self._friends_worker: CallWorker | None = None
+        # collection tracker (account-synced; pending sets survive a failed push)
+        self._col_owned: set = set()
+        self._col_pending_add: set = set()
+        self._col_pending_remove: set = set()
+        self._col_worker: CallWorker | None = None
 
         self.setWindowTitle("Farever Pal — by Escanor")
         self.setMinimumSize(1000, 640)
@@ -346,6 +353,9 @@ class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
         # Freshen friend presence/list when opening a page that shows it.
         if key in ("friends", "speedrun") and self.s.account_token:
             self._friends_poll()
+        # Freshen the account's collection when opening the tracker.
+        if key == "collection" and self.s.account_token:
+            self._col_pull()
 
     # ====================================================================
     #  Pages
@@ -428,11 +438,13 @@ class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
         """Refresh control-panel widgets that hold the accent as a captured value
         or paint it directly (QSS re-apply alone doesn't repaint these)."""
         from .components import (SectionHeader, Stepper, NavItem,
-                                 SegmentedControl, OverlayCard, SliderRow)
+                                 SegmentedControl, OverlayCard, SliderRow,
+                                 FilterChip)
         for sh in self.findChildren(SectionHeader):
             sh.set_color(theme.ACCENT)          # control-panel headers are all accent
         # widgets that captured the accent at construction -> re-tint each kind
-        for cls in (Stepper, NavItem, SegmentedControl, OverlayCard, SliderRow):
+        for cls in (Stepper, NavItem, SegmentedControl, OverlayCard, SliderRow,
+                    FilterChip):
             for w in self.findChildren(cls):
                 w.restyle()
         if hasattr(self, "_logo"):
@@ -579,6 +591,11 @@ class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
             self._friends_timer.stop()
             if self._friends_worker is not None and self._friends_worker.isRunning():
                 self._friends_worker.wait(1500)
+        except Exception:
+            pass
+        try:
+            if self._col_worker is not None and self._col_worker.isRunning():
+                self._col_worker.wait(1500)   # let a final collection push land
         except Exception:
             pass
         try:

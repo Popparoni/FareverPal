@@ -132,9 +132,7 @@ class SkillOverlay(OverlayWindow):
             self._feed.append(fr)
         self.content.addStretch(1)
 
-        self._grip = QtWidgets.QSizeGrip(self)
-        self._grip.setFixedSize(16, 16)
-        self._grip.setToolTip("Drag to resize")
+        self.enable_resize_grip()
 
         # wide-not-tall by default (the per-skill table is column-heavy); base is
         # UNSCALED so apply_scale (the overlay-scale slider) sizes it base*scale.
@@ -188,13 +186,6 @@ class SkillOverlay(OverlayWindow):
         self._cal_bar.set(0.62, "re-mapping — keep attacking")
         self._cal_bar.setVisible(True)
         self.summary.setText("recalibrating — attack something so it can re-map")
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        g = getattr(self, "_grip", None)
-        if g is not None:
-            g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
-            g.raise_()
 
     # --- tick ------------------------------------------------------------
     def _tick(self):

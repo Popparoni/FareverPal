@@ -138,6 +138,20 @@ class OverlayWindow(QtWidgets.QWidget):
         self._locked = on
         self.set_click_through(on)
 
+    # --- resize grip ------------------------------------------------------
+    def enable_resize_grip(self) -> None:
+        """Bottom-right drag-to-resize grip; pinned by the base resizeEvent."""
+        self._grip = QtWidgets.QSizeGrip(self)
+        self._grip.setFixedSize(16, 16)
+        self._grip.setToolTip("Drag to resize")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        g = getattr(self, "_grip", None)
+        if g is not None:
+            g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
+            g.raise_()
+
     def set_opacity(self, value: float) -> None:
         """Apply the global overlay opacity. Subclasses with child windows (e.g.
         the entity overlay's drop table) override this to forward it."""

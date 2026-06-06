@@ -61,6 +61,38 @@ def boss_loot_table(unit_id: str | None) -> str | None:
     return unit_id if (unit_id and unit_id in _named_bosses()) else None
 
 
+# Wild catchable companions: authoritative list = the collection catalog's
+# "companions" category (the same file the Collection tab / website show).
+# unit.type == "Critter" is the union fallback - the 60 catalog companions are
+# exactly the Critter units minus the Base_Critter template and the
+# YellowRabbits spawner row (verified against the CDB), and it still works
+# when the catalog json isn't bundled.
+COMPANION_TYPE = "Critter"
+
+
+@lru_cache(maxsize=1)
+def _companion_ids() -> frozenset[str]:
+    from . import collections as col
+    return frozenset(r["id"] for r in col.items("companions"))
+
+
+def unit_types() -> list[str]:
+    """All unitType ids (CDB), sorted — the choices for the enemy-type filter."""
+    return sorted(_type_to_table())
+
+
+def unit_type(unit_id: str | None) -> str | None:
+    row = _units_by_id().get(unit_id) if unit_id else None
+    return row.get("type") if row else None
+
+
+def is_companion(unit_id: str | None) -> bool:
+    """A wild catchable companion (Buttontail, Leggybug, Saladmander, …)."""
+    if not unit_id:
+        return False
+    return unit_id in _companion_ids() or unit_type(unit_id) == COMPANION_TYPE
+
+
 def unit_info(unit_id: str | None) -> dict | None:
     """{type, lvl, maxLvl, faction, lootTable, flags} for a unit-id, or None."""
     if not unit_id:
