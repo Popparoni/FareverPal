@@ -12,6 +12,7 @@ from .proc import Proc, ProcError
 from .hl import Hl
 from .scene import Scene, Entity, Element
 from .player import PlayerLocator
+from .camera import ViewCamera
 from .chest_resolver import ChestResolver, ChestRow
 from .damage_source import DamageSourceManager
 from . import attributes
@@ -40,6 +41,7 @@ class LiveModel:
         self.hl = Hl(proc)
         self.scene = Scene(proc, self.hl)
         self.locator = PlayerLocator(proc, self.hl)
+        self.view = ViewCamera(proc, self.hl, self.locator.app)
         self.chests_resolver = ChestResolver()
         self._units_cache: list[Entity] = []
         self._units_at = 0.0
@@ -89,13 +91,29 @@ class LiveModel:
         in which case the minimap falls back to the body heading. The angle's
         zero/sign convention differs from the world heading, so the minimap aligns
         it with CAM_YAW_SIGN / CAM_YAW_OFFSET (tune live)."""
+        return self._camera_f64("curDirection")
+
+    def camera_pitch(self) -> float | None:
+        """The camera's tilt (client.BaseCamera.curPitch, radians): 0 = level
+        with the horizon, negative = looking down (validated live: the default
+        gameplay camera reads ~-0.94). Drives the compass needle's ground-plane
+        foreshortening."""
+        return self._camera_f64("curPitch")
+
+    def view_matrix(self) -> list[float] | None:
+        """The engine camera's world->screen view-proj matrix (16 floats, row
+        major), or None while unresolved. The exact projection the game draws
+        with - see core/camera.py."""
+        return self.view.matrix()
+
+    def _camera_f64(self, field: str) -> float | None:
         cam = self.locator.app.camera()
         if cam is None:
             return None
         tp = self.hl.ptr(cam)
         if tp is None:
             return None
-        off = self.hl.field_offset(tp, "curDirection")
+        off = self.hl.field_offset(tp, field)
         if off is None:
             return None
         try:
@@ -160,7 +178,8 @@ class LiveModel:
 
     def nearest_enemies(self, xyz: XYZ, n: int, max_dist: float = 0.0,
                         enemies_only: bool = True,
-                        hide_types: set[str] | None = None):
+                        hide_types: set[str] | None = None,
+                        hide_units: set[str] | None = None):
         # wild companions (critters) are ent.Foe but not enemies - they get
         # their own list (nearest_companions)
         pool = [e for e in self.units()
@@ -168,6 +187,8 @@ class LiveModel:
                 and not udata.is_companion(e.unit_id)]
         if hide_types:
             pool = [e for e in pool if udata.unit_type(e.unit_id) not in hide_types]
+        if hide_units:
+            pool = [e for e in pool if e.unit_id not in hide_units]
         return self._ranked(pool, xyz, n, max_dist)
 
     def nearest_companions(self, xyz: XYZ, n: int):
@@ -197,6 +218,51 @@ class LiveModel:
             return [e for e in self.scene.elements(self.player_addr) if e.is_obelisk]
         except ProcError:
             return []
+
+    def live_orbs(self) -> list[Element]:
+        """Dungeon secret orbs (InstanceOrb) in the loaded scene."""
+        try:
+            return [e for e in self.scene.elements(self.player_addr) if e.is_orb]
+        except ProcError:
+            return []
+
+    def teleporters(self) -> list[Element]:
+        """Dungeon entrances / teleporters in the loaded scene."""
+        try:
+            return [e for e in self.scene.elements(self.player_addr) if e.is_teleporter]
+        except ProcError:
+            return []
+
+    def elements(self) -> list[Element]:
+        """All loaded interactible elements (any class)."""
+        try:
+            return self.scene.elements(self.player_addr)
+        except ProcError:
+            return []
+
+    _FX_OFF_CACHE: dict[int, int | None] = {}
+
+    def world_orb_fx(self) -> list[tuple[str, bool]]:
+        """(orb_id, glow-fx present) for loaded world secret orbs. The fx
+        pointer is the reliable collected signal (collected = no fx); offset
+        resolved by name per element type and cached."""
+        out = []
+        try:
+            for e in self.scene.elements(self.player_addr):
+                if not (e.elem_id and e.elem_id.startswith("RedOrb_World")):
+                    continue
+                tp = self.hl.ptr(e.addr)
+                if tp is None:
+                    continue
+                if tp not in self._FX_OFF_CACHE:
+                    self._FX_OFF_CACHE[tp] = self.hl.field_offset(tp, "currentFx")
+                off = self._FX_OFF_CACHE[tp]
+                if off is None:
+                    continue
+                out.append((e.elem_id, bool(self.hl.u64(e.addr + off))))
+        except ProcError:
+            return []
+        return out
 
     def boss_state(self) -> tuple[str | None, bool, float | None]:
         scene = self.units()        # populates dungeon_boss; must run first

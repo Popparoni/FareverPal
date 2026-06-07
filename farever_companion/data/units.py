@@ -81,6 +81,46 @@ def unit_types() -> list[str]:
     return sorted(_type_to_table())
 
 
+# Types kept out of the Codex enemy filter even though they carry a display
+# name: Critter = the wild-companion section, Mount = non-attackable.
+NON_CODEX_TYPES = frozenset({COMPANION_TYPE, "Mount"})
+# Inheritance templates, not real spawnable enemies.
+_TEMPLATE_IDS = frozenset({"BaseHero", "BaseMob", "BaseSummon", "BaseMount",
+                           "Base_Critter"})
+
+
+@lru_cache(maxsize=1)
+def codex_types() -> tuple[tuple[str, str], ...]:
+    """(unitType id, display name) for the bestiary/Codex enemy types, sorted
+    by display name. A type is Codex-worthy when its unitType row carries a
+    display name; nameless internals (Totem, Environment, Human) drop out, and
+    Critter/Mount are excluded explicitly (companions / non-attackable)."""
+    out = []
+    for r in cdb.lines("unitType"):
+        name = (r.get("name") or "").strip()
+        if name and r["id"] not in NON_CODEX_TYPES:
+            out.append((r["id"], name))
+    return tuple(sorted(out, key=lambda t: t[1]))
+
+
+def type_name(type_id: str | None) -> str:
+    for tid, name in codex_types():
+        if tid == type_id:
+            return name
+    return type_id or ""
+
+
+@lru_cache(maxsize=1)
+def codex_unit_ids() -> tuple[str, ...]:
+    """All concrete enemy unit ids whose type is a Codex type (no Base* /
+    *_Base inheritance templates)."""
+    ctypes = {tid for tid, _ in codex_types()}
+    return tuple(sorted(
+        u for u, r in _units_by_id().items()
+        if r.get("type") in ctypes and u not in _TEMPLATE_IDS
+        and not u.endswith("_Base")))
+
+
 def unit_type(unit_id: str | None) -> str | None:
     row = _units_by_id().get(unit_id) if unit_id else None
     return row.get("type") if row else None

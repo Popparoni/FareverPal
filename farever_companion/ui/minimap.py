@@ -1,9 +1,10 @@
 """Minimap overlay.
 
-Top-down radar centred on the player: chests, gatherables, enemies and obelisks
-plotted from the shared LiveModel + the static chest index. Zoomable; POIs
-beyond the view clamp to the edge ring as direction markers. Right-click a POI
-to mark it done (persists). The view rotates by the camera orbit yaw (mouse
+Top-down radar centred on the player: chests, gatherables, enemies, obelisks
+and secret orbs plotted from the shared LiveModel + the static chest/orb
+indexes. Zoomable; POIs beyond the view clamp to the edge ring as direction
+markers. Right-click a POI to mark it done (persists). The compass-needle
+target (set from the entity HUD, ui/tracker.py) shows as an accent ring. The view rotates by the camera orbit yaw (mouse
 look, via `model.camera_yaw()`) so it tracks where you're looking even when
 standing still; it falls back to the movement heading when the camera yaw can't
 be read. The player arrow shows the body heading within that frame."""
@@ -16,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from . import theme
 from .overlay_base import OverlayWindow
 from ..data import icons
+from ..geo import nav, orbs as geo_orbs
 
 POLL_MS = 300     # POI rescan (heavy)
 FAST_MS = 33      # position/heading repaint (cheap) -> smooth pan + rotation
@@ -26,10 +28,8 @@ FAST_MS = 33      # position/heading repaint (cheap) -> smooth pan + rotation
 MAP_SCALE = 0.89
 MAP_OFF_X = 0.89 * 1724                       # 1534.36
 MAP_OFF_Y = 5120 - (0.89 * 4096 - 1595)       # 3069.56
-# camera-yaw -> rotation calibration (tune live: sign flips orbit direction,
-# offset aligns "up" with the camera's forward)
-CAM_YAW_SIGN = 1.0
-CAM_YAW_OFFSET = 0.0
+# camera-yaw -> rotation calibration lives in geo/nav.py (CAM_YAW_SIGN /
+# CAM_YAW_OFFSET), shared with the compass needle.
 _MAP_PM = None
 _MAP_TRIED = False
 
@@ -56,19 +56,21 @@ class _Canvas(QtWidgets.QWidget):
         self.model = model
         self.s = settings
         self.setMinimumSize(220, 220)
-        self._pois: list[tuple[float, float, str, str, str]] = []  # x,y,kind,label,id
-        self._px = self._py = 0.0
+        self._pois: list[tuple] = []      # (x, y, z, kind, label, id)
+        self._px = self._py = self._pz = 0.0
         self._heading: float | None = None    # movement facing
         self._cam_yaw: float | None = None    # free-look camera yaw
+        self._mtx = None                      # engine view-proj matrix
         self._drag = None
 
     def _read_player(self) -> bool:
         xyz = self.model.player_xyz()
         if xyz is None:
             return False
-        self._px, self._py, _ = xyz
+        self._px, self._py, self._pz = xyz
         self._heading = self.model.player_heading()       # movement facing (arrow)
-        self._cam_yaw = self.model.camera_yaw()           # free-look yaw (map rotation)
+        self._cam_yaw = self.model.camera_yaw()           # free-look yaw (fallback)
+        self._mtx = self.model.view_matrix()              # exact view rotation
         return True
 
     def refresh_fast(self):
@@ -93,21 +95,43 @@ class _Canvas(QtWidgets.QWidget):
                 for r in self.model.nearest_chests_merged(xyz, n=60):
                     c = next((c for c in self.model.chests if c.chest_id == r.chest_id), None)
                     if c:
-                        pois.append((c.x, c.y, "chest", r.loot_table or r.chest_id, r.chest_id))
+                        pois.append((c.x, c.y, c.z, "chest",
+                                     r.loot_table or r.chest_id, r.chest_id))
+                # live-only chests (world-activity loot drops) have no static
+                # position row; plot them from the live element directly
+                static_ids = {c.chest_id for c in self.model.chests}
+                for e in self.model.live_chests():
+                    if (e.elem_id or "") not in static_ids:
+                        pois.append((e.x, e.y, e.z, "activity", e.elem_id or "loot",
+                                     e.elem_id or f"ch{e.addr}"))
             except Exception:
                 pass
         # live entities (each layer independently toggleable)
         try:
             if s.minimap_enemies:
                 for e in self.model.enemies():
-                    pois.append((e.x, e.y, "enemy", e.unit_id or "?", f"e{e.addr}"))
+                    pois.append((e.x, e.y, e.z, "enemy", e.unit_id or "?", f"e{e.addr}"))
             if s.minimap_gatherables:
                 for g in self.model.gatherables():
-                    pois.append((g.x, g.y, "gatherable", g.elem_id or "?", g.elem_id or ""))
+                    pois.append((g.x, g.y, g.z, "gatherable", g.elem_id or "?",
+                                 g.elem_id or ""))
             if s.minimap_obelisks:
                 for o in self.model.obelisks():
-                    pois.append((o.x, o.y, "obelisk", o.elem_id or "obelisk",
+                    pois.append((o.x, o.y, o.z, "obelisk", o.elem_id or "obelisk",
                                  o.elem_id or f"ob{o.addr}"))
+            if s.minimap_orbs:
+                # static world orbs (Collector achievements) + live dungeon
+                # orbs; collected ones (auto-synced or right-clicked) draw
+                # greyed via the done state, like chests
+                for ob in geo_orbs.load_orbs():
+                    pois.append((ob.x, ob.y, ob.z, "orb", ob.orb_id, ob.orb_id))
+                for e in self.model.live_orbs():
+                    pois.append((e.x, e.y, e.z, "orb", e.elem_id or "orb",
+                                 e.elem_id or f"orb{e.addr}"))
+            if s.minimap_dungeons:
+                for t in self.model.teleporters():
+                    pois.append((t.x, t.y, t.z, "dungeon", t.elem_id or "teleport",
+                                 t.elem_id or f"tp{t.addr}"))
         except Exception:
             pass
         self._pois = pois
@@ -118,17 +142,17 @@ class _Canvas(QtWidgets.QWidget):
         return (min(self.width(), self.height()) / 2 - 6) / view
 
     def _phi(self):
-        """Rotation applied so the view direction points up. Prefer the free-look
-        CAMERA yaw (mouse orbit); fall back to movement heading; 0 = north-up.
-        Heading is a world atan2 (0=+x, CCW) and north is -y, so facing-up is
-        phi = pi/2 + heading (the north-up Y flip in _rel carries the sign)."""
+        """Rotation applied so the view direction points up; 0 = north-up.
+        Prefer the exact rotation from the engine camera matrix (any yaw, no
+        calibration); fall back to the camera-yaw field, then the movement
+        heading (see geo/nav.py)."""
         if not self.s.minimap_rotate:
             return 0.0
-        if self._cam_yaw is not None:
-            return math.pi / 2 - (CAM_YAW_SIGN * self._cam_yaw + CAM_YAW_OFFSET)
-        if self._heading is not None:
-            return math.pi / 2 + self._heading
-        return 0.0
+        if self._mtx:
+            phi = nav.ground_view_phi(self._mtx, self._px, self._py, self._pz)
+            if phi is not None:
+                return phi
+        return nav.view_phi(self._cam_yaw, self._heading)
 
     def _rel(self, wx, wy, scale, phi):
         """World point -> rotated screen-space delta (dx right, dy up).
@@ -177,7 +201,8 @@ class _Canvas(QtWidgets.QWidget):
             else:
                 p.drawEllipse(QtCore.QPointF(cx, cy), rad * f, rad * f)
         # POIs
-        for (wx, wy, kind, label, poi_id) in self._pois:
+        track_pos = self._track_pos()
+        for (wx, wy, _wz, kind, label, poi_id) in self._pois:
             dx, dy = self._rel(wx, wy, scale, phi)
             edge = False
             if square:
@@ -198,6 +223,13 @@ class _Canvas(QtWidgets.QWidget):
                     edge = True
             sx, sy = cx + dx, cy - dy
             done = bool(poi_id and self.s.is_done(poi_id))
+            if self._is_waypoint(kind, label, poi_id, wx, wy, track_pos):
+                # the compass waypoint: accent ring so the target is obvious
+                ring = QtGui.QColor(self.s.hud_accent)
+                p.setPen(QtGui.QPen(ring, 2))
+                p.setBrush(QtCore.Qt.NoBrush)
+                r_hl = (self.s.minimap_icon_size / 2 + 3) if not edge else 6
+                p.drawEllipse(QtCore.QPointF(sx, sy), r_hl, r_hl)
             pm = self._poi_pixmap(kind, label, self.s.minimap_icon_size) \
                 if (self.s.minimap_icons and not edge) else None
             if pm is not None:
@@ -255,12 +287,13 @@ class _Canvas(QtWidgets.QWidget):
         p.fillRect(self.rect(), veil)
 
     # bundled flat marker icons (assets/map_icons) per layer
-    _MARKER = {"chest": "chest", "gatherable": "mining", "obelisk": "portal"}
+    _MARKER = {"chest": "chest", "gatherable": "gatherable", "obelisk": "obelisk",
+               "orb": "orb", "activity": "activity", "dungeon": "dungeon"}
 
     def _poi_pixmap(self, kind, label, size):
         """A POI marker pixmap: enemies show the real per-unit game icon (organic
         outline); chests/crates, gatherables and obelisks use the bundled flat
-        marker icons (treasure / pickaxe / portal). Falls back to a tinted UI
+        marker icons (assets/map_icons). Falls back to a tinted UI
         glyph, then to a plain dot."""
         if kind == "enemy" and label and icons.has_icon("unit", label):
             return icons.outlined("unit", label, size, theme.DANGER)
@@ -270,7 +303,8 @@ class _Canvas(QtWidgets.QWidget):
             if pm is not None:
                 return pm
         glyph = {"chest": "box", "obelisk": "radio", "gatherable": "dice-5",
-                 "enemy": "swords"}.get(kind)
+                 "enemy": "swords", "orb": "broadcast", "activity": "box",
+                 "dungeon": "map"}.get(kind)
         if glyph:
             return icons.ui_icon(glyph, theme.KIND_COLOR.get(kind, theme.TEXT), size)
         return None
@@ -289,11 +323,78 @@ class _Canvas(QtWidgets.QWidget):
             p.drawText(QtCore.QRectF(lx - 8, ly - 8, 16, 16),
                        QtCore.Qt.AlignCenter, label)
 
+    def _track_pos(self):
+        """(x, y) of a tracked 'pos' waypoint, or None."""
+        if self.s.track_kind != "pos":
+            return None
+        try:
+            coords = self.s.track_id.split("|", 1)[0].split(",")
+            return (float(coords[0]), float(coords[1]))
+        except (ValueError, IndexError):
+            return None
+
+    def _is_waypoint(self, kind, label, poi_id, wx, wy, track_pos) -> bool:
+        tk, tid = self.s.track_kind, self.s.track_id
+        if not tk:
+            return False
+        if tk == "orb":
+            return kind == "orb" and poi_id == tid
+        if tk == "unit":
+            return kind == "enemy" and label == tid
+        if tk == "pos" and track_pos is not None:
+            return abs(wx - track_pos[0]) < 0.5 and abs(wy - track_pos[1]) < 0.5
+        return False
+
+    # overlapping markers: the click prefers the kind the player most likely
+    # aims at (orbs are small primary targets and lose a raw nearest-test)
+    _CLICK_PRIORITY = {"orb": 0, "enemy": 1, "chest": 2, "activity": 2,
+                       "dungeon": 3, "obelisk": 4, "gatherable": 5}
+
+    def _poi_at(self, pos):
+        """The POI under a click, hit-testing the *drawn* position - same edge
+        clamp as paintEvent, so far markers are clickable on the ring. Among
+        everything within the hit radius, kind priority breaks the overlap."""
+        cx, cy = self.width() / 2, self.height() / 2
+        rad = min(self.width(), self.height()) / 2 - 4
+        square = self.s.minimap_shape == "Square"
+        scale = self._scale()
+        phi = self._phi()
+        best, best_rank = None, None
+        for poi in self._pois:
+            wx, wy = poi[0], poi[1]
+            dx, dy = self._rel(wx, wy, scale, phi)
+            m = max(abs(dx), abs(dy)) if square else math.hypot(dx, dy)
+            if m > rad - 4 and m > 0:
+                k = (rad - 4) / m
+                dx *= k; dy *= k
+            d = math.hypot(cx + dx - pos.x(), cy - dy - pos.y())
+            if d >= 12.0:
+                continue
+            rank = (self._CLICK_PRIORITY.get(poi[3], 9), d)
+            if best_rank is None or rank < best_rank:
+                best, best_rank = poi, rank
+        return best
+
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.RightButton:
             self._mark_done(e)
             return
         if e.button() == QtCore.Qt.LeftButton and not getattr(self.window(), "_locked", False):
+            # any marker is a compass waypoint: enemies track the unit, orbs
+            # the orb, everything else a fixed position
+            tr = getattr(self.window(), "_tracker", None)
+            poi = self._poi_at(e.position())
+            if poi is not None and tr is not None:
+                wx, wy, wz, kind, label, poi_id = poi
+                if kind == "orb" and poi_id and poi_id in geo_orbs.by_id():
+                    tr.toggle("orb", poi_id)
+                elif kind == "enemy" and label and label != "?":
+                    tr.toggle("unit", label)
+                else:
+                    # incl. live dungeon orbs (not in the static index):
+                    # any other marker becomes a fixed-position waypoint
+                    tr.toggle("pos", f"{wx:.1f},{wy:.1f},{wz:.1f}|{label or kind}")
+                return
             # drag the window from the map body (the only grip in bare mode)
             self._drag = e.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
 
@@ -314,7 +415,7 @@ class _Canvas(QtWidgets.QWidget):
         scale = self._scale()
         phi = self._phi()
         best, bestd = None, 12.0
-        for (wx, wy, _k, _l, poi_id) in self._pois:
+        for (wx, wy, _wz, _k, _l, poi_id) in self._pois:
             dx, dy = self._rel(wx, wy, scale, phi)
             sx, sy = cx + dx, cy - dy
             d = math.hypot(sx - e.position().x(), sy - e.position().y())
@@ -322,6 +423,10 @@ class _Canvas(QtWidgets.QWidget):
                 best, bestd = poi_id, d
         if best:
             self.s.toggle_done(best)
+            # collecting the needle's target ends the tracking
+            tr = getattr(self.window(), "_tracker", None)
+            if tr is not None and tr.is_tracked("orb", best) and self.s.is_done(best):
+                tr.clear()
             self.update()
 
 
@@ -329,6 +434,7 @@ class MinimapOverlay(OverlayWindow):
     def __init__(self, model, settings, parent=None):
         super().__init__("MAP", settings, geo_key="minimap", parent=parent)
         self.s = settings
+        self._tracker = None
         zin = QtWidgets.QPushButton("+"); zin.setObjectName("Icon")
         zout = QtWidgets.QPushButton("−"); zout.setObjectName("Icon")
         zin.clicked.connect(lambda: self._zoom(1.25))
@@ -338,7 +444,7 @@ class MinimapOverlay(OverlayWindow):
 
         self.canvas = _Canvas(model, settings)
         self.content.addWidget(self.canvas, 1)
-        self._hint = QtWidgets.QLabel("right-click a marker = mark done · drag map to move")
+        self._hint = QtWidgets.QLabel("click a marker = compass waypoint · right-click = mark done")
         self._hint.setObjectName("Muted")
         self.content.addWidget(self._hint)
 
@@ -372,6 +478,12 @@ class MinimapOverlay(OverlayWindow):
         self.s.minimap_zoom = max(2.0, min(60.0, self.s.minimap_zoom * f))
         self.s.save()
         self.canvas.update()
+
+    def set_tracker(self, tracker) -> None:
+        """The shared TrackController; the tracked orb shows as an accent ring
+        and right-click-done on it ends the tracking."""
+        self._tracker = tracker
+        tracker.changed.connect(self.canvas.update)
 
     def closeEvent(self, e):
         self._fast.stop()

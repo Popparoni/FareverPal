@@ -61,6 +61,9 @@ KIND_COLOR = {
     "chest": CHEST,
     "gatherable": GOOD,
     "obelisk": ACCENT,
+    "orb": "#3b82f6",        # matches the blue orb marker art
+    "activity": "#8fa395",   # world-activity loot drops (grey-green marker)
+    "dungeon": "#7c3aed",    # dungeon entrances / teleporters
 }
 
 

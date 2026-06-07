@@ -111,9 +111,17 @@ class OverlayWindow(QtWidgets.QWidget):
 
     def apply_scale(self, scale: float) -> None:
         """Uniform per-overlay zoom via a scaled QSS (text + metrics); also grows
-        the window from the subclass's base size."""
+        the window from the subclass's base size. The first call after a restore
+        re-applies the persisted (drag-resized) size instead, so a relaunch
+        doesn't snap a resizable overlay back to base*scale; later calls (the
+        scale slider, DPS mode switches) resize normally."""
         self._scale = scale or 1.0
         self._apply_style()
+        saved = getattr(self, "_saved_size", None)
+        if saved is not None:
+            self._saved_size = None
+            self.resize(*saved)
+            return
         bw, bh = getattr(self, "_base_w", 0), getattr(self, "_base_h", 0)
         if bw and bh:
             self.resize(round(bw * self._scale), round(bh * self._scale))
@@ -140,7 +148,9 @@ class OverlayWindow(QtWidgets.QWidget):
 
     # --- resize grip ------------------------------------------------------
     def enable_resize_grip(self) -> None:
-        """Bottom-right drag-to-resize grip; pinned by the base resizeEvent."""
+        """Bottom-right drag-to-resize grip; pinned by the base resizeEvent.
+        Also opts the overlay into size persistence (geometry saves w,h too)."""
+        self._resizable = True
         self._grip = QtWidgets.QSizeGrip(self)
         self._grip.setFixedSize(16, 16)
         self._grip.setToolTip("Drag to resize")
@@ -159,9 +169,14 @@ class OverlayWindow(QtWidgets.QWidget):
 
     # --- geometry persistence -------------------------------------------
     def persist_geometry(self) -> None:
+        """Position always; size too for grip-resizable overlays, so a drag-
+        resize survives the relaunch (it used to snap back to base*scale)."""
         if self._settings is None:
             return
-        self._settings.geometry[self._geo_key] = f"{self.x()},{self.y()}"
+        g = f"{self.x()},{self.y()}"
+        if getattr(self, "_resizable", False):
+            g += f",{self.width()},{self.height()}"
+        self._settings.geometry[self._geo_key] = g
         self._settings.save()
 
     def _restore_geometry(self) -> None:
@@ -170,8 +185,14 @@ class OverlayWindow(QtWidgets.QWidget):
         g = self._settings.geometry.get(self._geo_key)
         if g:
             try:
-                x, y = (int(v) for v in g.split(","))
-                self.move(x, y)
+                parts = [int(v) for v in g.split(",")]
+                self.move(parts[0], parts[1])
+                if len(parts) == 4 and parts[2] >= 120 and parts[3] >= 80:
+                    # stash for the subclass's first apply_scale (which would
+                    # otherwise resize to base*scale over this) + apply now for
+                    # overlays that never call apply_scale
+                    self._saved_size = (parts[2], parts[3])
+                    self.resize(parts[2], parts[3])
                 return
             except ValueError:
                 pass

@@ -16,6 +16,8 @@ from .skill_overlay import SkillOverlay
 from .minimap import MinimapOverlay
 from .speedrun_overlay import SpeedrunOverlay
 from .crosshair import CrosshairOverlay
+from .tracker import TrackController
+from ..geo import orb_sync
 
 # The game HUD overlays that share the global opacity + lock (crosshair has its
 # own opacity/click-through). One place so new overlays inherit both.
@@ -35,12 +37,51 @@ class OverlayManager(QtCore.QObject):
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.s = settings
-        self.model = None       # set by the panel on attach; None when detached
+        self.model = None       # set via set_model on attach; None when detached
         self.overlays: dict[str, QtWidgets.QWidget | None] = {}
         self.cards: dict[str, list] = {}
+        # the one compass-needle target, shared by every overlay
+        self.tracker = TrackController(settings, self)
+        # auto-sync collected orbs from the live glow-fx signal (1 Hz, only
+        # while attached; see geo/orb_sync.py)
+        self._orb_sync = orb_sync.FxSync()
+        self._orb_timer = QtCore.QTimer(self)
+        self._orb_timer.timeout.connect(self._orb_tick)
         # account collection state (None = signed out / unknown); the entity
         # overlay marks wild companions that aren't collected yet
         self.collection_owned: set | None = None
+
+    def set_model(self, model) -> None:
+        self.model = model
+        self.tracker.set_model(model)
+        if model is None:
+            self._orb_timer.stop()
+        else:
+            self._orb_sync = orb_sync.FxSync()
+            self._orb_timer.start(1000)
+
+    def _orb_tick(self) -> None:
+        """Mark loaded world orbs with no glow fx as collected (debounced);
+        un-mark any seen glowing (live truth wins)."""
+        m = self.model
+        if m is None:
+            return
+        try:
+            mark, unmark = self._orb_sync.update(
+                m.world_orb_fx(), set(self.s.poi_done))
+        except Exception:
+            return
+        if not mark and not unmark:
+            return
+        done = set(self.s.poi_done)
+        done.update(mark)
+        done.difference_update(unmark)
+        self.s.poi_done = sorted(done)
+        self.s.save()
+        for oid in mark:                    # collected the needle's target
+            if self.tracker.is_tracked("orb", oid):
+                self.tracker.clear()
+        self.tracker.changed.emit()         # overlays re-render their orb rows
 
     # --- toggle cards ----------------------------------------------------
     def register_card(self, key: str, card) -> None:
@@ -71,6 +112,8 @@ class OverlayManager(QtCore.QObject):
             ov.request_config.connect(self.request_config)
         if hasattr(ov, "set_collection_owned"):
             ov.set_collection_owned(self.collection_owned)
+        if hasattr(ov, "set_tracker"):
+            ov.set_tracker(self.tracker)
         return ov
 
     def request(self, key: str, on: bool) -> None:
@@ -115,6 +158,7 @@ class OverlayManager(QtCore.QObject):
             ov = self.overlays.get(key)
             if ov and ov.isVisible():
                 ov.set_opacity(self.s.opacity)   # forwards to child windows (drop table)
+        self.tracker.set_opacity(self.s.opacity)
 
     def set_lock(self, on: bool) -> None:
         self.s.lock_overlays = on

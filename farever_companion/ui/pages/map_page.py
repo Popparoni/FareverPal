@@ -4,6 +4,7 @@ from PySide6 import QtWidgets
 from .. import components as C
 from ...data import loot
 from ...data import icons
+from ...geo import orbs as geo_orbs
 
 class MapPageMixin:
     def _page_map(self):
@@ -51,15 +52,24 @@ class MapPageMixin:
                 ("minimap_enemies", "Enemies"),
                 ("minimap_chests", "Chests / loot"),
                 ("minimap_gatherables", "Gatherables"),
-                ("minimap_obelisks", "Obelisks")]):
+                ("minimap_obelisks", "Obelisks"),
+                ("minimap_orbs", "Secret orbs"),
+                ("minimap_dungeons", "Dungeons / teleports")]):
             t = C.LabeledToggle(label, getattr(self.s, attr))
             t.toggled.connect(lambda on, a=attr: self._set_minimap_layer(a, on))
             grid.addWidget(t, i // 2, i % 2)
         v.addLayout(grid)
 
-        note = QtWidgets.QLabel("Right-click a marker to mark it done (persists).")
+        note = QtWidgets.QLabel(
+            "Right-click a marker to mark it done (persists). The compass needle"
+            " is set from the Entity overlay (click an enemy or secret orb row).")
+        note.setWordWrap(True)
         note.setObjectName("Muted")
         v.addWidget(note)
+        self._orb_progress = QtWidgets.QLabel()
+        self._orb_progress.setObjectName("Muted")
+        self._refresh_orb_progress()
+        v.addWidget(self._orb_progress)
         v.addStretch(1)
         return page
 
@@ -103,3 +113,13 @@ class MapPageMixin:
         ov = self.overlays.get("map")
         if ov is not None and hasattr(ov, "canvas"):
             ov.canvas.refresh()
+
+    def _refresh_orb_progress(self):
+        prog = geo_orbs.region_progress(self.s.poi_done)
+        if not prog:
+            self._orb_progress.setText("")
+            return
+        parts = [f"{geo_orbs.REGION_NAMES.get(r, r)} {d}/{t}"
+                 for r, (d, t) in prog.items()]
+        self._orb_progress.setText(
+            "Orbs collected (auto-synced near orbs): " + " · ".join(parts))

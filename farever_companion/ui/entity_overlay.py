@@ -4,7 +4,9 @@ The entity HUD lists nearby enemies (selectable with ↑/↓ or click) and chest
 short, no endless scrolling. Selecting an enemy opens a separate, closable
 **Drop Table** window showing that target's full predicted loot (rarity-grouped,
 collapsible; class-usable items starred). If the selected target leaves range we
-flip to the first available one. Reads the shared LiveModel. Procedural
+flip to the first available one. Clicking an enemy, wild companion or secret
+orb also points the centre-screen compass needle at it (ui/tracker.py); click
+the tracked row again to stop. Reads the shared LiveModel. Procedural
 generators shown honestly as "🎲 random X". Read-only.
 """
 from __future__ import annotations
@@ -19,6 +21,7 @@ from .overlay_base import OverlayWindow
 from .components import SectionHeader, IconTile
 from .widgets import fmt_pct
 from ..data import names, classes, tokens, icons
+from ..geo import orbs as geo_orbs
 
 POLL_MS = 350
 _RARITY_ORDER = {"Legendary": 0, "Epic": 1, "Rare": 2, "Uncommon": 3, "Common": 4}
@@ -36,6 +39,7 @@ class RowSpec:
     bold: bool = False
     highlight: bool = False
     cb: object = None
+    marker: str = ""      # map-marker icon name instead of a game-sheet icon
 
 
 class _EntityRow(QtWidgets.QFrame):
@@ -70,7 +74,10 @@ class _EntityRow(QtWidgets.QFrame):
 
     def apply(self, spec: RowSpec, icon_size: int):
         self.tile.set_size(icon_size)
-        self.tile.set(spec.sheet, spec.id_, spec.accent)
+        if spec.marker:
+            self.tile.set_marker(spec.marker, spec.accent)
+        else:
+            self.tile.set(spec.sheet, spec.id_, spec.accent)
         weight = "700" if spec.bold else "500"
         self.name.setText(spec.name)
         self.name.setStyleSheet(
@@ -259,9 +266,12 @@ class EntityOverlay(OverlayWindow):
         self.model = model
         self.s = settings
         self._enemies: list = []          # [(entity, dist)]
+        self._comps: list = []            # [(entity, dist)] wild companions
+        self._orbs: list = []             # [(Orb, dist)] uncollected secret orbs
         self._chests: list = []           # [ChestRow]
         self._owned: set | None = None    # account collection (None = signed out)
         self._sel = None                  # ("enemy", addr) | ("chest", chest_id)
+        self._tracker = None              # shared compass-needle TrackController
         self._drop_win: DropTableOverlay | None = None
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
@@ -282,8 +292,9 @@ class EntityOverlay(OverlayWindow):
         self.content.addWidget(scroll, 1)
         self.enemy_box = _Section("ENEMIES", theme.DANGER)
         self.comp_box = _Section("COMPANIONS", theme.GOOD)
+        self.orb_box = _Section("SECRET ORBS", theme.KIND_COLOR["orb"])
         self.chest_box = _Section("CHESTS", theme.CHEST)
-        for b in (self.enemy_box, self.comp_box, self.chest_box):
+        for b in (self.enemy_box, self.comp_box, self.orb_box, self.chest_box):
             self._body.addWidget(b)
         self._body.addStretch(1)
 
@@ -331,17 +342,24 @@ class EntityOverlay(OverlayWindow):
             super().keyPressEvent(e)
 
     def _targets(self):
-        """Ordered selectable keys: enemies first, then chests."""
+        """Ordered selectable keys across every visible section: enemies,
+        companions, orbs, chests (matching the HUD layout)."""
         t = [("enemy", getattr(e, "addr", None)) for e, _ in self._enemies
              if getattr(e, "addr", None) is not None]
+        t += [("comp", getattr(e, "addr", None)) for e, _ in self._comps
+              if getattr(e, "addr", None) is not None]
+        t += [("orb", o.orb_id) for o, _ in self._orbs]
         t += [("chest", c.chest_id) for c in self._chests]
         return t
 
     def _selected_source(self):
-        """(near, name) for the current selection, or (None, '')."""
+        """(near, name) for the current selection, or (None, ''). Companions
+        and orbs aren't loot sources - they drive the compass instead."""
         if self._sel is None:
             return None, ""
         kind, key = self._sel
+        if kind in ("comp", "orb"):
+            return None, ""
         if kind == "enemy":
             for e, d in self._enemies:
                 if getattr(e, "addr", None) == key:
@@ -365,7 +383,16 @@ class EntityOverlay(OverlayWindow):
             i = 0
         i = max(0, min(len(targets) - 1, i + delta))
         self._sel = targets[i]
-        self._open_drops()
+        kind, key = self._sel
+        if kind in ("enemy", "chest"):
+            self._open_drops()              # loot sources -> drop table
+        elif kind == "comp":
+            e = next((e for e, _ in self._comps
+                      if getattr(e, "addr", None) == key), None)
+            if e is not None and self._tracker is not None:
+                self._tracker.track("unit", e.unit_id)
+        elif kind == "orb" and self._tracker is not None:
+            self._tracker.track("orb", key)  # collectibles -> compass needle
         self._refresh()
 
     def _select(self, kind, key):
@@ -399,6 +426,26 @@ class EntityOverlay(OverlayWindow):
     def set_collection_owned(self, owned: set | None) -> None:
         self._owned = owned
 
+    def set_tracker(self, tracker) -> None:
+        self._tracker = tracker
+        tracker.changed.connect(self._tick)
+
+    def _track(self, kind: str, key: str | None) -> None:
+        if self._tracker is not None and key:
+            self._tracker.toggle(kind, key)
+
+    def _is_tracked(self, kind: str, key: str | None) -> bool:
+        return self._tracker is not None and key is not None \
+            and self._tracker.is_tracked(kind, key)
+
+    def _is_tracked_instance(self, unit_id: str | None, addr) -> bool:
+        """Only the live instance the needle is locked on shows TRACKING -
+        not every unit of the tracked type."""
+        if not self._is_tracked("unit", unit_id):
+            return False
+        locked = self._tracker.locked_addr
+        return locked is None or locked == addr
+
     def _open_drops(self):
         if self._sel is None:
             return
@@ -416,6 +463,12 @@ class EntityOverlay(OverlayWindow):
             self._drop_win.set_target(*self._selected_source())
 
     # --- helpers ---------------------------------------------------------
+    def _ranked_orbs(self, xyz):
+        """Nearest uncollected orbs, plain distance order."""
+        pool = [o for o in geo_orbs.load_orbs() if not self.s.is_done(o.orb_id)]
+        return sorted(((o, o.dist(*xyz)) for o in pool),
+                      key=lambda t: t[1])[:self.s.orb_count]
+
     def _tick(self):
         try:
             self._refresh()
@@ -430,11 +483,15 @@ class EntityOverlay(OverlayWindow):
         self.pos.setText(f"X {xyz[0]:.0f}   Y {xyz[1]:.0f}   Z {xyz[2]:.0f}")
         isz = round(self.s.icon_size * self._scale)
 
-        # 1) gather both lists
+        # 1) gather every section's list (selection cycles across all of them)
         self._enemies = self.model.nearest_enemies(
             xyz, self.s.enemy_count, self.s.max_dist, self.s.enemies_only,
-            hide_types=set(self.s.entity_hidden_types)) \
+            hide_types=set(self.s.entity_hidden_types),
+            hide_units=set(self.s.entity_hidden_units)) \
             if self.s.show_enemies else []
+        self._comps = self.model.nearest_companions(xyz, self.s.companion_count) \
+            if self.s.show_companions else []
+        self._orbs = self._ranked_orbs(xyz) if self.s.show_orbs else []
         self._chests = self.model.nearest_chests_merged(
             xyz, self.s.chest_count, self.s.max_dist) if self.s.show_chests else []
 
@@ -450,11 +507,14 @@ class EntityOverlay(OverlayWindow):
             for e, d in self._enemies:
                 key = ("enemy", getattr(e, "addr", None))
                 sel = key == self._sel
+                tracked = self._is_tracked_instance(e.unit_id, getattr(e, "addr", None))
                 col = self.s.hud_accent if sel else theme.KIND_COLOR.get(e.kind, theme.TEXT)
                 specs.append(RowSpec(
                     "unit", e.unit_id, col, names.unit_name(e.unit_id) or "?", col,
-                    value=f"{d:.0f}m", bold=sel, highlight=sel,
-                    cb=(lambda k=key: self._select(*k))))
+                    sub="◈ TRACKING" if tracked else "",
+                    value=f"{d:.0f}m", bold=sel, highlight=sel or tracked,
+                    cb=(lambda k=key, uid=e.unit_id:
+                        (self._select(*k), self._track("unit", uid)))))
             self.enemy_box.fill(specs, isz)
             # honest empty-state: a failed read (zone swap) is not "no enemies"
             if not getattr(self.model, "units_ok", True):
@@ -471,45 +531,65 @@ class EntityOverlay(OverlayWindow):
         # enemies, never distance-capped. Ones missing from the account
         # collection get flagged.
         if self.s.show_companions:
-            comps = self.model.nearest_companions(xyz, self.s.companion_count)
             self.comp_box.show()
             specs = []
             n_new = 0
-            for e, d in comps:
+            for e, d in self._comps:
                 missing = self._owned is not None and e.unit_id not in self._owned
                 n_new += missing
+                addr = getattr(e, "addr", None)
+                tracked = self._is_tracked_instance(e.unit_id, addr)
+                sel = ("comp", addr) == self._sel
                 col = theme.GOLD if missing else theme.GOOD
+                sub_bits = [b for b in ("★ NOT COLLECTED" if missing else "",
+                                        "◈ TRACKING" if tracked else "") if b]
                 specs.append(RowSpec(
                     "unit", e.unit_id, col,
                     names.unit_name(e.unit_id) or names.humanize(e.unit_id), col,
-                    sub="★ NOT COLLECTED" if missing else "",
-                    value=f"{d:.0f}m", bold=missing, highlight=missing))
+                    sub="  ·  ".join(sub_bits),
+                    value=f"{d:.0f}m", bold=missing or sel,
+                    highlight=missing or tracked or sel,
+                    cb=(lambda uid=e.unit_id: self._track("unit", uid))))
             self.comp_box.fill(specs, isz)
             if not getattr(self.model, "units_ok", True):
                 tag = "READ FAILED · RETRYING"
-            elif not comps:
+            elif not self._comps:
                 tag = "0 · NONE LOADED"
             else:
-                tag = f"{len(comps)} · WILD"
+                tag = f"{len(self._comps)} · WILD"
                 if n_new:
                     tag += f" · ★{n_new} NEW"
             self.comp_box.header.set_tag(tag)
         else:
             self.comp_box.hide()
 
-        # 5) render chests (also selectable -> show their loot table)
+        # 5) render the nearest uncollected secret orbs (click = compass needle)
+        if self.s.show_orbs:
+            self.orb_box.show()
+            orb_col = theme.KIND_COLOR["orb"]
+            specs = []
+            for o, d in self._orbs:
+                tracked = self._is_tracked("orb", o.orb_id)
+                sel = ("orb", o.orb_id) == self._sel
+                col = self.s.hud_accent if (tracked or sel) else orb_col
+                specs.append(RowSpec(
+                    None, None, orb_col, geo_orbs.orb_label(o.orb_id), col,
+                    sub="◈ TRACKING" if tracked else geo_orbs.orb_region_name(o),
+                    value=f"{d:.0f}m", bold=tracked or sel,
+                    highlight=tracked or sel,
+                    cb=(lambda oid=o.orb_id: self._track("orb", oid)),
+                    marker="orb"))
+            self.orb_box.fill(specs, isz)
+            self.orb_box.header.set_tag(
+                f"{len(self._orbs)} · CLICK TO TRACK" if self._orbs else "ALL MARKED")
+        else:
+            self.orb_box.hide()
+
+        # 6) render chests (also selectable -> show their loot table)
         if self.s.show_chests:
             self.chest_box.show()
             specs = []
             for c in self._chests:
-                drop_id = None
-                if c.loot_table:
-                    try:
-                        from ..data import loot
-                        pr = loot.predict_sorted(c.loot_table, c.level or self.s.level)
-                        drop_id = pr[0][0] if pr else None
-                    except Exception:
-                        pass
                 sel = ("chest", c.chest_id) == self._sel
                 anomaly = bool(c.live and c.anomaly)
                 color = self.s.hud_accent if (sel or anomaly) else theme.CHEST
@@ -520,17 +600,20 @@ class EntityOverlay(OverlayWindow):
                     sub_bits.append(c.state.upper())
                 if anomaly:
                     sub_bits.append("★ ANOMALY")
+                # world-activity loot drops get their own marker art
+                accent = theme.KIND_COLOR["activity"] if anomaly else theme.CHEST
                 specs.append(RowSpec(
-                    "item", drop_id, theme.CHEST, label, color,
+                    None, None, accent, label, color,
                     sub="  ·  ".join(sub_bits), value=f"{c.dist:.0f}m",
                     bold=sel, highlight=sel,
-                    cb=(lambda cid=c.chest_id: self._select("chest", cid))))
+                    cb=(lambda cid=c.chest_id: self._select("chest", cid)),
+                    marker="activity" if anomaly else "chest"))
             self.chest_box.fill(specs, isz)
             self.chest_box.header.set_tag(f"{len(self._chests)} · CLICK FOR LOOT")
         else:
             self.chest_box.hide()
 
-        # 6) keep the open drop window synced with live selection / auto-flip
+        # 7) keep the open drop window synced with live selection / auto-flip
         self._update_drops()
 
     def closeEvent(self, e):

@@ -166,7 +166,7 @@ class ControlPanel(AccountMixin, SpeedrunPageMixin, FriendsPageMixin,
         self._locate_bar.setVisible(on)
 
     def _on_model_changed(self, model):
-        self.overlay_mgr.model = model
+        self.overlay_mgr.set_model(model)
 
     def _on_detaching(self):
         # The controller is about to stop the model's threads; close overlays

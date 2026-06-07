@@ -51,6 +51,11 @@ class Settings:
     companion_count: int = 6
     # unitType ids hidden from the entity HUD's enemy list ([] = show all)
     entity_hidden_types: list = field(default_factory=list)
+    # individual unit ids hidden from the enemy list ([] = show all)
+    entity_hidden_units: list = field(default_factory=list)
+    # nearest uncollected secret orbs as their own HUD section (click = compass)
+    show_orbs: bool = True
+    orb_count: int = 5
     max_dist: float = 0.0            # 0 = no cap
     icon_size: int = 28
     opacity: float = 0.92
@@ -88,19 +93,25 @@ class Settings:
     # fallback regardless.
     dps_per_skill: bool = False
     # minimap
-    minimap_zoom: float = 14.0
-    minimap_size: int = 320
-    minimap_shape: str = "Circle"     # Circle | Square
+    minimap_zoom: float = 8.0
+    minimap_size: int = 400
+    minimap_shape: str = "Square"     # Circle | Square
     minimap_rotate: bool = True       # rotate map with player heading (else north-up)
-    minimap_bare: bool = False        # chromeless: just the map, no titlebar/panel
+    minimap_bare: bool = True         # chromeless: just the map, no titlebar/panel
     minimap_texture: bool = True      # draw the W1 world map under the POIs
     minimap_icons: bool = True        # POIs as real icons (else plain dots)
-    minimap_icon_size: int = 18       # POI icon size on the minimap (px)
+    minimap_icon_size: int = 28       # POI icon size on the minimap (px)
     # minimap layer visibility (independent of the entity overlay's show_* flags)
     minimap_enemies: bool = True
     minimap_chests: bool = True       # chests, crates & world-activity loot drops
     minimap_gatherables: bool = True
     minimap_obelisks: bool = True
+    minimap_orbs: bool = True         # secret orbs (Collector achievements)
+    minimap_dungeons: bool = True     # dungeon entrances / teleporters
+    # compass-needle target ("" = none): kind "orb" tracks a static secret orb,
+    # kind "unit" locks onto the nearest live instance of that unit id
+    track_kind: str = ""
+    track_id: str = ""
     show_gatherables: bool = True
     show_obelisks: bool = True
     # crosshair overlay

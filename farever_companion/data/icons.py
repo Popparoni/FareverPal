@@ -88,6 +88,28 @@ def tile(sheet: str | None, id_: str | None, size: int, accent: str):
     return pm
 
 
+@lru_cache(maxsize=1024)
+def tile_marker(name: str, size: int, accent: str):
+    """Map-marker PNG (assets/map_icons/<name>.png) on the standard accent-
+    tinted square tile - the entity-HUD row icon for chests / orbs / world
+    activities, matching the minimap's marker art."""
+    QtGui, QtCore = _qt()
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtGui.QColor(0, 0, 0, 0))
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    bg = QtGui.QColor(accent); bg.setAlpha(46)
+    bd = QtGui.QColor(accent); bd.setAlpha(140)
+    p.setBrush(bg)
+    p.setPen(QtGui.QPen(bd, 1))
+    p.drawRect(QtCore.QRectF(0.5, 0.5, size - 1, size - 1))
+    g = asset_icon(name, size - 4)
+    if g is not None:
+        p.drawPixmap((size - g.width()) // 2, (size - g.height()) // 2, g)
+    p.end()
+    return pm
+
+
 def _silhouette(g, color):
     """A solid-`color` silhouette of pixmap `g`, preserving its alpha, i.e. the
     icon's organic shape filled flat. (SourceIn keeps `g`'s alpha, replaces RGB.)"""
