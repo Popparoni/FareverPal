@@ -60,8 +60,7 @@ companion/
   CREDITS.md         third-party attribution
 ```
 
-Data (CDB sheets, icons, names, chest positions) is reused from the workspace
-(`../data/sheets`, `../htdocs/assets/...`, `../notes`) via `paths.py`.
+Data (CDB sheets, icons, names, chest positions) is reused from the workspace via `paths.py`.
 
 ## Run from source
 
@@ -100,8 +99,7 @@ package.bat      :: runs PyInstaller -> dist\FareverPal.exe (bundles sheets + ic
 
 ## Use
 
-1. Launch Farever and load fully into the world. If you have another memory
-   tool attached to the game, unload it first to avoid a conflict.
+1. Launch Farever and load fully into the world.
 2. Run the app — it attaches **automatically** when Farever is running and locates
    your character once you're in-world (no button; the status line shows when it's
    ready and follows you across zones/menus).
