@@ -98,6 +98,13 @@ def loot_table_for(chest_id: str | None) -> str | None:
     return None
 
 
+def is_crate(loot_table: str | None) -> bool:
+    """True for real openable chests (WorldCrate + the faction *Crate tables).
+    Everything else chest-shaped is a world ACTIVITY reward (time puzzles,
+    chest-orb puzzles, world bosses) and shouldn't be presented as a chest."""
+    return bool(loot_table) and loot_table.endswith("Crate")
+
+
 def nearest(chests, x: float, y: float, z: float, n: int = 10):
     ranked = sorted(((c, c.dist(x, y, z)) for c in chests), key=lambda t: t[1])
     return ranked[:n]

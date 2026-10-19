@@ -89,21 +89,17 @@ class _Canvas(QtWidgets.QWidget):
         xyz = (self._px, self._py, 0.0)
         pois = []
         s = self.s
-        # static + live chests / crates / world-activity loot drops
+        # static + live chests: only the *Crate tables are real chests; all
+        # other chest-shaped elements are world ACTIVITIES (time/orb puzzles,
+        # world bosses) and get the activity marker
         if s.minimap_chests:
             try:
-                for r in self.model.nearest_chests_merged(xyz, n=60):
-                    c = next((c for c in self.model.chests if c.chest_id == r.chest_id), None)
-                    if c:
-                        pois.append((c.x, c.y, c.z, "chest",
-                                     r.loot_table or r.chest_id, r.chest_id))
-                # live-only chests (world-activity loot drops) have no static
-                # position row; plot them from the live element directly
-                static_ids = {c.chest_id for c in self.model.chests}
-                for e in self.model.live_chests():
-                    if (e.elem_id or "") not in static_ids:
-                        pois.append((e.x, e.y, e.z, "activity", e.elem_id or "loot",
-                                     e.elem_id or f"ch{e.addr}"))
+                for r in self.model.nearest_chests_merged(xyz, n=80):
+                    if not (r.x or r.y):
+                        continue
+                    kind = "chest" if r.is_crate else "activity"
+                    pois.append((r.x, r.y, r.z, kind,
+                                 r.loot_table or r.chest_id, r.chest_id))
             except Exception:
                 pass
         # live entities (each layer independently toggleable)
@@ -223,6 +219,10 @@ class _Canvas(QtWidgets.QWidget):
                     edge = True
             sx, sy = cx + dx, cy - dy
             done = bool(poi_id and self.s.is_done(poi_id))
+            if done and kind == "orb" and self.s.minimap_hide_done_orbs:
+                # collected orbs hidden entirely - several orbs at one spot
+                # otherwise stack their greyed opacity back to opaque
+                continue
             if self._is_waypoint(kind, label, poi_id, wx, wy, track_pos):
                 # the compass waypoint: accent ring so the target is obvious
                 ring = QtGui.QColor(self.s.hud_accent)

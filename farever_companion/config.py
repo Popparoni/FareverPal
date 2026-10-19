@@ -107,6 +107,9 @@ class Settings:
     minimap_gatherables: bool = True
     minimap_obelisks: bool = True
     minimap_orbs: bool = True         # secret orbs (Collector achievements)
+    minimap_hide_done_orbs: bool = False  # hide collected orbs entirely (else
+                                          # drawn greyed); stops opacity stacking
+                                          # where several orbs share a spot
     minimap_dungeons: bool = True     # dungeon entrances / teleporters
     # compass-needle target ("" = none): kind "orb" tracks a static secret orb,
     # kind "unit" locks onto the nearest live instance of that unit id

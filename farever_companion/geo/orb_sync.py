@@ -14,6 +14,58 @@ from __future__ import annotations
 
 LIVE_PREFIX = "RedOrb_World"
 
+# chest visual states observed live: 'Closed' (available), 'Locked' (needs
+# key/quest - still present, not looted). Anything else on a loaded chest
+# element means it was opened; back to Closed (respawn) un-marks.
+CHEST_AVAILABLE_STATES = frozenset({"Closed", "Locked"})
+
+
+def sync_chests(live: list[tuple[str, str | None]], done: set[str]
+                ) -> tuple[list[str], list[str]]:
+    """`live` = [(chest_id, state)] for loaded chest elements. Returns
+    (mark opened, unmark) deltas; unknown/null states change nothing.
+    NOTE: an opened crate keeps reading 'Closed' (lazy visual state, observed
+    live), so this only catches future state words; the reliable open signal
+    is the LootDrop spawn below."""
+    mark: list[str] = []
+    unmark: list[str] = []
+    for cid, state in live:
+        if not state or not cid:
+            continue
+        if state in CHEST_AVAILABLE_STATES:
+            if cid in done:
+                unmark.append(cid)          # respawned / still lootable
+        elif cid not in done:
+            mark.append(cid)                # opened
+    return mark, unmark
+
+
+# drops scatter around the opened chest (observed live: nearest pile 4.4u
+# from the chest origin); chests are never packed this close together
+LOOTDROP_RADIUS = 8.0
+
+
+def chests_opened_by_drops(drops: list[tuple[float, float, float]],
+                           chests: list[tuple[str, float, float, float]],
+                           done: set[str]) -> list[str]:
+    """Opening a chest spawns LootDrop elements at its position - the only
+    reliable client-side open signal (the chest's own state stays 'Closed').
+    `drops` = loot-drop positions, `chests` = (id, x, y, z). Returns ids to
+    mark opened. Only catches opens while the companion watches; despawned
+    drops simply stop marking (the mark persists)."""
+    mark: list[str] = []
+    if not drops:
+        return mark
+    r2 = LOOTDROP_RADIUS * LOOTDROP_RADIUS
+    for cid, cx, cy, cz in chests:
+        if cid in done:
+            continue
+        for dx, dy, dz in drops:
+            if ((cx - dx) ** 2 + (cy - dy) ** 2 + (cz - dz) ** 2) <= r2:
+                mark.append(cid)
+                break
+    return mark
+
 
 class FxSync:
     def __init__(self) -> None:

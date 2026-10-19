@@ -438,6 +438,13 @@ class EntityOverlay(OverlayWindow):
         return self._tracker is not None and key is not None \
             and self._tracker.is_tracked(kind, key)
 
+    @staticmethod
+    def _chest_pos_key(c) -> str:
+        """The chest's compass waypoint key (same shape as map waypoints)."""
+        label = names.loot_table_label(c.loot_table) if c.loot_table \
+            else names.humanize(c.chest_id)
+        return f"{c.x:.1f},{c.y:.1f},{c.z:.1f}|{label}"
+
     def _is_tracked_instance(self, unit_id: str | None, addr) -> bool:
         """Only the live instance the needle is locked on shows TRACKING -
         not every unit of the tracked type."""
@@ -492,8 +499,13 @@ class EntityOverlay(OverlayWindow):
         self._comps = self.model.nearest_companions(xyz, self.s.companion_count) \
             if self.s.show_companions else []
         self._orbs = self._ranked_orbs(xyz) if self.s.show_orbs else []
-        self._chests = self.model.nearest_chests_merged(
-            xyz, self.s.chest_count, self.s.max_dist) if self.s.show_chests else []
+        # real chests only (WorldCrate & co.) - activity rewards (time/orb
+        # puzzles, world bosses) aren't chests; opened ones (loot-drop sync /
+        # right-click) leave the list like collected orbs do
+        self._chests = [c for c in self.model.nearest_chests_merged(
+            xyz, self.s.chest_count + 8, self.s.max_dist, crates_only=True)
+            if not self.s.is_done(c.chest_id)][:self.s.chest_count] \
+            if self.s.show_chests else []
 
         # 2) keep selection valid (auto-flip to first available target)
         targets = self._targets()
@@ -591,23 +603,22 @@ class EntityOverlay(OverlayWindow):
             specs = []
             for c in self._chests:
                 sel = ("chest", c.chest_id) == self._sel
-                anomaly = bool(c.live and c.anomaly)
-                color = self.s.hud_accent if (sel or anomaly) else theme.CHEST
+                tracked = self._is_tracked("pos", self._chest_pos_key(c))
+                color = self.s.hud_accent if (sel or tracked) else theme.CHEST
                 label = names.loot_table_label(c.loot_table) if c.loot_table \
                     else names.humanize(c.chest_id)
                 sub_bits = []
                 if c.state:
                     sub_bits.append(c.state.upper())
-                if anomaly:
-                    sub_bits.append("★ ANOMALY")
-                # world-activity loot drops get their own marker art
-                accent = theme.KIND_COLOR["activity"] if anomaly else theme.CHEST
+                if tracked:
+                    sub_bits.append("◈ TRACKING")
                 specs.append(RowSpec(
-                    None, None, accent, label, color,
+                    None, None, theme.CHEST, label, color,
                     sub="  ·  ".join(sub_bits), value=f"{c.dist:.0f}m",
-                    bold=sel, highlight=sel,
-                    cb=(lambda cid=c.chest_id: self._select("chest", cid)),
-                    marker="activity" if anomaly else "chest"))
+                    bold=sel or tracked, highlight=sel or tracked,
+                    cb=(lambda c_=c: (self._select("chest", c_.chest_id),
+                                      self._track("pos", self._chest_pos_key(c_)))),
+                    marker="chest"))
             self.chest_box.fill(specs, isz)
             self.chest_box.header.set_tag(f"{len(self._chests)} · CLICK FOR LOOT")
         else:

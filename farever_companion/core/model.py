@@ -34,6 +34,8 @@ class Nearest:
 
 class LiveModel:
     UNITS_TTL = 0.10
+    ELEMS_TTL = 0.15           # shared by every element accessor (minimap
+                               # layers, orb/chest sync, loot drops)
     CHEST_DIST_BIAS = 0.5      # chests win over a slightly-closer enemy
 
     def __init__(self, proc: Proc):
@@ -45,6 +47,8 @@ class LiveModel:
         self.chests_resolver = ChestResolver()
         self._units_cache: list[Entity] = []
         self._units_at = 0.0
+        self._elems_cache: list[Element] = []
+        self._elems_at = 0.0
         self.dungeon_boss: str | None = None
         self.dps = DpsMeter()
         self.damage = DamageSourceManager(proc)
@@ -201,44 +205,44 @@ class LiveModel:
                 and not e.is_player_owned]
         return self._ranked(pool, xyz, n, 0.0)
 
-    def live_chests(self) -> list[Element]:
+    def _elements(self) -> list[Element]:
+        """One shared, TTL-cached scene read for every element accessor -
+        a minimap tick + the sync used to trigger 6+ separate full reads."""
+        now = time.monotonic()
+        if now - self._elems_at < self.ELEMS_TTL:
+            return self._elems_cache
         try:
-            return [e for e in self.scene.elements(self.player_addr) if e.is_chest]
+            self._elems_cache = self.scene.elements(self.player_addr)
         except ProcError:
-            return []
+            self._elems_cache = []
+        self._elems_at = now
+        return self._elems_cache
+
+    def live_chests(self) -> list[Element]:
+        return [e for e in self._elements() if e.is_chest]
 
     def gatherables(self) -> list[Element]:
-        try:
-            return [e for e in self.scene.elements(self.player_addr) if e.is_gatherable]
-        except ProcError:
-            return []
+        return [e for e in self._elements() if e.is_gatherable]
 
     def obelisks(self) -> list[Element]:
-        try:
-            return [e for e in self.scene.elements(self.player_addr) if e.is_obelisk]
-        except ProcError:
-            return []
+        return [e for e in self._elements() if e.is_obelisk]
 
     def live_orbs(self) -> list[Element]:
         """Dungeon secret orbs (InstanceOrb) in the loaded scene."""
-        try:
-            return [e for e in self.scene.elements(self.player_addr) if e.is_orb]
-        except ProcError:
-            return []
+        return [e for e in self._elements() if e.is_orb]
 
     def teleporters(self) -> list[Element]:
         """Dungeon entrances / teleporters in the loaded scene."""
-        try:
-            return [e for e in self.scene.elements(self.player_addr) if e.is_teleporter]
-        except ProcError:
-            return []
+        return [e for e in self._elements() if e.is_teleporter]
+
+    def loot_drops(self) -> list[Element]:
+        """Spawned loot piles (opening a crate drops these at its position)."""
+        return [e for e in self._elements()
+                if e.cls == "ent.interactible.LootDrop"]
 
     def elements(self) -> list[Element]:
         """All loaded interactible elements (any class)."""
-        try:
-            return self.scene.elements(self.player_addr)
-        except ProcError:
-            return []
+        return self._elements()
 
     _FX_OFF_CACHE: dict[int, int | None] = {}
 
@@ -248,7 +252,7 @@ class LiveModel:
         resolved by name per element type and cached."""
         out = []
         try:
-            for e in self.scene.elements(self.player_addr):
+            for e in self._elements():
                 if not (e.elem_id and e.elem_id.startswith("RedOrb_World")):
                     continue
                 tp = self.hl.ptr(e.addr)
@@ -355,10 +359,10 @@ class LiveModel:
         return self.chests_resolver.chest_table(chest_id, self.dungeon_boss,
                                                 default_table)
 
-    def nearest_chests_merged(self, xyz: XYZ, n: int, max_dist: float = 0.0
-                              ) -> list[ChestRow]:
+    def nearest_chests_merged(self, xyz: XYZ, n: int, max_dist: float = 0.0,
+                              crates_only: bool = False) -> list[ChestRow]:
         return self.chests_resolver.nearest_chests_merged(
-            xyz, n, self.dungeon_boss, self.live_chests(), max_dist)
+            xyz, n, self.dungeon_boss, self.live_chests(), max_dist, crates_only)
 
     def closest_loot(self, xyz: XYZ, default_level: int) -> Nearest | None:
         cands: list[tuple[float, Nearest]] = []

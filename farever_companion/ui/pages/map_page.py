@@ -60,6 +60,12 @@ class MapPageMixin:
             grid.addWidget(t, i // 2, i % 2)
         v.addLayout(grid)
 
+        hide_orbs = C.LabeledToggle(
+            "Hide collected orbs", self.s.minimap_hide_done_orbs)
+        hide_orbs.toggled.connect(
+            lambda on: self._set_minimap_layer("minimap_hide_done_orbs", on))
+        v.addWidget(hide_orbs)
+
         note = QtWidgets.QLabel(
             "Right-click a marker to mark it done (persists). The compass needle"
             " is set from the Entity overlay (click an enemy or secret orb row).")

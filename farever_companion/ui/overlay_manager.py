@@ -8,6 +8,8 @@ reference back to the panel. Read-only: the overlays only consume the model.
 """
 from __future__ import annotations
 
+import time
+
 from PySide6 import QtCore, QtWidgets
 
 from .entity_overlay import EntityOverlay
@@ -45,6 +47,9 @@ class OverlayManager(QtCore.QObject):
         # auto-sync collected orbs from the live glow-fx signal (1 Hz, only
         # while attached; see geo/orb_sync.py)
         self._orb_sync = orb_sync.FxSync()
+        # chests despawn the moment they're opened (observed live), so drops
+        # are matched against where a chest stood in the last ~15s
+        self._recent_chests: dict[str, tuple[float, float, float, float]] = {}
         self._orb_timer = QtCore.QTimer(self)
         self._orb_timer.timeout.connect(self._orb_tick)
         # account collection state (None = signed out / unknown); the entity
@@ -58,17 +63,39 @@ class OverlayManager(QtCore.QObject):
             self._orb_timer.stop()
         else:
             self._orb_sync = orb_sync.FxSync()
-            self._orb_timer.start(1000)
+            # 2 Hz so short-lived LootDrop spawns (picked up in ~1-2s) are
+            # never missed; cheap thanks to the shared elements cache
+            self._orb_timer.start(500)
 
     def _orb_tick(self) -> None:
         """Mark loaded world orbs with no glow fx as collected (debounced);
-        un-mark any seen glowing (live truth wins)."""
+        un-mark any seen glowing. Same for chests via their visual state
+        (opened = anything but Closed/Locked; respawn un-marks)."""
         m = self.model
         if m is None:
             return
         try:
-            mark, unmark = self._orb_sync.update(
-                m.world_orb_fx(), set(self.s.poi_done))
+            done = set(self.s.poi_done)
+            mark, unmark = self._orb_sync.update(m.world_orb_fx(), done)
+            live_chests = m.live_chests()
+            cmark, cunmark = orb_sync.sync_chests(
+                [(e.elem_id, e.state) for e in live_chests], done)
+            # the reliable open signal: a loot pile spawning where a chest
+            # stood - the chest itself despawns on open, so remember recent
+            # chest positions and match drops against those
+            now = time.monotonic()
+            for e in live_chests:
+                if e.elem_id:
+                    self._recent_chests[e.elem_id] = (e.x, e.y, e.z, now)
+            self._recent_chests = {k: v for k, v in self._recent_chests.items()
+                                   if now - v[3] < 15.0}
+            drops = [(d.x, d.y, d.z) for d in m.loot_drops()]
+            if drops:
+                chests = [(cid, x, y, z) for cid, (x, y, z, _t)
+                          in self._recent_chests.items()]
+                cmark += orb_sync.chests_opened_by_drops(drops, chests, done)
+            mark += cmark
+            unmark += cunmark
         except Exception:
             return
         if not mark and not unmark:

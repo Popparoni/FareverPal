@@ -23,6 +23,13 @@ class ChestRow:
     state: str | None
     live: bool
     anomaly: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+    @property
+    def is_crate(self) -> bool:
+        return chestdb.is_crate(self.loot_table)
 
 
 class ChestResolver:
@@ -51,7 +58,8 @@ class ChestResolver:
         return tbl
 
     def nearest_chests_merged(self, xyz, n: int, dungeon_boss: str | None,
-                              live_chests, max_dist: float = 0.0) -> list[ChestRow]:
+                              live_chests, max_dist: float = 0.0,
+                              crates_only: bool = False) -> list[ChestRow]:
         rows: dict[str, ChestRow] = {}
         for c, d in chestdb.nearest(self.chests, *xyz, n=10 ** 6):
             tbl = self.chest_table(c.chest_id, dungeon_boss, c.loot_table)
@@ -59,13 +67,17 @@ class ChestResolver:
             if (tbl and dungeon_boss and tbl != dungeon_boss
                     and udata.is_boss(tbl)):
                 continue
-            rows[c.chest_id] = ChestRow(c.chest_id, d, tbl, c.level, None, False)
+            rows[c.chest_id] = ChestRow(c.chest_id, d, tbl, c.level, None, False,
+                                        x=c.x, y=c.y, z=c.z)
         for e in live_chests:
             d = e.dist(*xyz)
             rows[e.elem_id or "?"] = ChestRow(
                 e.elem_id or "?", d, self.chest_table(e.elem_id or "?", dungeon_boss),
-                None, e.state, True, anomaly=(e.elem_id not in self._static_ids))
+                None, e.state, True, anomaly=(e.elem_id not in self._static_ids),
+                x=e.x, y=e.y, z=e.z)
         out = sorted(rows.values(), key=lambda r: r.dist)
+        if crates_only:
+            out = [r for r in out if r.is_crate]
         if max_dist > 0:
             out = [r for r in out if r.dist <= max_dist]
         return out[:n]

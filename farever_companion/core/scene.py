@@ -36,6 +36,7 @@ _ELEM_KINDS = {
     "ent.interactible.RespawnPoint": "respawn",
     "ent.interactible.InstanceOrb": "orb",
     "ent.interactible.Teleporter": "dungeon",   # dungeon entrances / teleports
+    "ent.interactible.LootDrop": "loot",
 }
 PLAYER_OWNER_CLASSES = {"ent.Hero"}
 

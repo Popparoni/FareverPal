@@ -1,5 +1,41 @@
-"""Fx-based collected-orb detection (glow fx = not collected), debounced."""
-from farever_companion.geo.orb_sync import FxSync
+"""Fx-based collected-orb detection (glow fx = not collected), debounced,
+plus chest open/close state sync."""
+from farever_companion.geo.chests import is_crate
+from farever_companion.geo.orb_sync import FxSync, sync_chests
+
+
+def test_is_crate_classification():
+    assert is_crate("WorldCrate")
+    assert is_crate("BeeCrate") and is_crate("CrimsonCrate")
+    assert not is_crate("WorldActivity")
+    assert not is_crate("KoboldActivity")
+    assert not is_crate("Nepsilon")        # world boss
+    assert not is_crate(None)
+
+
+def test_lootdrop_on_chest_marks_opened():
+    from farever_companion.geo.orb_sync import chests_opened_by_drops
+    chests = [("WorldChest_63", 100.0, 200.0, 10.0),
+              ("WorldChest_64", 160.0, 200.0, 10.0)]
+    drops = [(101.5, 201.0, 10.5)]                  # pile on chest 63
+    assert chests_opened_by_drops(drops, chests, set()) == ["WorldChest_63"]
+    # already marked -> quiet; far drop -> nothing
+    assert chests_opened_by_drops(drops, chests, {"WorldChest_63"}) == []
+    assert chests_opened_by_drops([(500, 500, 0)], chests, set()) == []
+
+
+def test_chest_opened_marks_and_respawn_unmarks():
+    mark, unmark = sync_chests(
+        [("W1_Siagarta_WorldChest_19", "Open"),
+         ("Chest_A", "Closed"), ("Chest_B", "Locked")], set())
+    assert mark == ["W1_Siagarta_WorldChest_19"]
+    assert unmark == []
+    # respawned crate un-greys; null state changes nothing
+    mark, unmark = sync_chests(
+        [("W1_Siagarta_WorldChest_19", "Closed"), ("Chest_C", None)],
+        {"W1_Siagarta_WorldChest_19"})
+    assert mark == []
+    assert unmark == ["W1_Siagarta_WorldChest_19"]
 
 
 def test_fxless_marks_after_two_ticks():
